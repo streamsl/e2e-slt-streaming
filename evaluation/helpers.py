@@ -31,6 +31,24 @@ SACREBLEU_TOKENIZE_BY_LANG = {
 }
 SACREBLEU_TOKENIZE = SACREBLEU_TOKENIZE_BY_LANG.get(TGT_LANG, '13a')
 
+# mBART tokenizer can encode CJK punctuation, but the decoder consistently emits ASCII equivalents
+# (e.g. "，" -> ",", "。" -> ".", "！" -> "!"). Predictions therefore always carry ASCII punctuation
+# while CSL-Daily ground-truth carries CJK punctuation, which causes BLEU/chrF/ROUGE to penalize
+# every sentence on punctuation alone. We normalize BOTH sides to ASCII before scoring so the metric
+# measures translation quality, not punctuation parity. Applied symmetrically to keep the comparison
+# fair; the lossy direction (CJK -> ASCII) is one-way safe since ASCII punctuation cannot map back.
+_CJK_PUNCT_TABLE = str.maketrans({
+    '，': ',', '。': '.', '？': '?', '！': '!', '、': ',', '；': ';', '：': ':',
+    '（': '(', '）': ')', '【': '[', '】': ']', '《': '<', '》': '>',
+    '「': '"', '」': '"', '『': '"', '』': '"', '“': '"', '”': '"', '‘': "'", '’': "'",
+    '—': '-', '–': '-', '·': '.', '…': '...', '　': ' ', '﹏': '_', '～': '~', 
+	'￥': '$', '％': '%', '＃': '#', '＠': '@',
+})
+def normalize_cjk_punct(s: str) -> str:
+    # Map full-width / CJK punctuation to ASCII so mBART's decoded-ASCII predictions and the
+    # GT subtitles are scored on equal footing. No-op for strings without CJK punctuation.
+    return s.translate(_CJK_PUNCT_TABLE) if s else s
+
 # BLEURT-20 supports 100+ languages including de_DE and zh_CN; the older BLEURT-base is English-only.
 # Loading is the same; the user must point BLEURT_CHECKPOINT_PATH at a multilingual checkpoint for non-English.
 bleu = evaluate.load('sacrebleu')  # Range: 0-100
@@ -115,6 +133,11 @@ def compute_text_metrics(predictions: List[str], references: List[str]) -> Dict[
 	# Language-aware: sacrebleu tokenization is selected from TGT_LANG (config); BLEURT/ROUGE/METEOR/CIDEr operate on
 	# untokenized strings. For Chinese, ROUGE/METEOR work on chars by default; CHRF and BLEU(zh) carry the most signal.
 	if len(predictions) == 0: return {'bleu4': 0.0, 'bleurt': 0.0, 'rougeL': 0.0, 'cider': 0.0, 'meteor': 0.0, 'chrf': 0.0}
+	# Normalize CJK punctuation to ASCII on both sides for zh_CN — mBART decodes "，" as ",", "。" as
+	# ".", etc., so leaving CJK punctuation in the GT would deflate every metric on punctuation alone.
+	if TGT_LANG == 'zh_CN':
+		predictions = [normalize_cjk_punct(p) for p in predictions]
+		references  = [normalize_cjk_punct(r) for r in references]
 	bleu_score = bleu.compute(
 		predictions=predictions,
 		references=[[ref] for ref in references],
