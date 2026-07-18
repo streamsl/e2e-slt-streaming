@@ -136,13 +136,18 @@ class DVCDataset(Dataset):
             
             # Randomly select a start frame for the window
             for try_num in range(self.max_tries):
-                window_start_frame = np.random.randint(0, max_start_frame)
+                # randint high is EXCLUSIVE; use +1 so the tail window [T-W, T] is reachable (paper
+                # Algorithm 1: s ~ Uniform(0, T-W), inclusive; the fallback branches already use +1).
+                window_start_frame = np.random.randint(0, max_start_frame + 1)
                 window_end_frame = window_start_frame + self.window_size_frames
-                
-                window = self._get_window_data(video_id, window_start_frame, window_end_frame)
-                if self.min_events <= window[-1]['class_labels'].shape[0] <= self.max_events: # Check events
+
+                # Count the TRUE number of fully-enclosed valid sentences (NOT the label count, which _get_window_data caps at max_events -> 
+                # the `<= max_events` test would be unreachable and over-dense windows would be accepted with the surplus sentences silently 
+                # trained as background). This also avoids loading poses for rejected windows.
+                true_count = self._count_valid_events(video_id, window_start_frame, window_end_frame)
+                if self.min_events <= true_count <= self.max_events:
                     # print(f'Sampled valid window for {video_id} (try {try_num+1})')
-                    return window
+                    return self._get_window_data(video_id, window_start_frame, window_end_frame)
                 
             print(f"Warning: Can't find window with {self.min_events} <= events <= {self.max_events} for {video_id} after {self.max_tries} tries\n"
                   f"=> Fallback: pick a window that guarantees events within [{self.min_events}, {self.max_events}] if possible, "
@@ -230,7 +235,7 @@ class DVCDataset(Dataset):
         # Paragraph-level input to train non-streaming models in a streaming manner, with masking support for contrastive learning
         if labels['seq_tokens']: # At least 1 valid subtitle in window
             labels['paragraph_tokens'] = ' '.join(labels['seq_tokens'])  # Concatenate all subtitles into a single paragraph
-            if self.split == 'train' and np.random.uniform(0, 1) <= 1.0: # Apply noise injection only during training
+            if self.split == 'train': # Apply per-word noise injection only during training (rate=noise_rate below)
                 labels['masked_paragraph_tokens'] = ' '.join([
                     self.tokenizer.mask_token if np.random.uniform(0, 1) < self.noise_rate else word 
                     for word in labels['paragraph_tokens'].split()
@@ -280,6 +285,19 @@ class DVCDataset(Dataset):
         return video_id, window_start_frame, window_end_frame, poses_tensor, frame_mask, labels
     
     
+    def _count_valid_events(self, video_id, window_start_frame, window_end_frame):
+        '''Number of subtitles fully enclosed in [start, end] with valid duration. This is the single source of truth for "how many 
+        valid sentences does this window contain" — the same predicate used to build labels in _get_window_data and to filter eval 
+        windows. Uses only precomputed metadata (no pose loading).'''
+        count = 0
+        for sub in self.video_metadata[video_id]['subtitles']:
+            sub_start_frame = int(sub['start'] * FPS)
+            sub_end_frame = int(sub['end'] * FPS)
+            if sub_start_frame >= window_start_frame and sub_end_frame <= window_end_frame and \
+                MIN_SUB_DURATION <= sub['duration'] <= MAX_SUB_DURATION:
+                count += 1
+        return count
+
     def _sample_densest_window(self, video_id):
         ''' Fallback sampler:
         - Prefer windows that fully contain events within [min_events, max_events] range.
