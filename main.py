@@ -48,11 +48,18 @@ class ModelArguments:
     num_queries: int = field(default=30, metadata={'help': 'Maximum number of events a window can have'})
     num_labels: int = field(default=1, metadata={'help': 'Single foreground class for caption'})
     auxiliary_loss: bool = field(default=True, metadata={'help': 'The training step may spend a time in per-layer caption alignment and Hungarian matching'})
-    class_cost: float = field(default=2, metadata={'help': 'Relative weight of the classification error'})
-    bbox_cost: float = field(default=0, metadata={'help': 'Relative weight of the L1 error of the bounding box coordinates'})
-    giou_cost: float = field(default=4, metadata={'help': 'Relative weight of the generalized IoU loss of the bounding box'})
-    counter_cost: float = field(default=2, metadata={'help': 'Relative weight of the event counter loss'})
-    caption_cost: float = field(default=2, metadata={'help': 'Relative weight of the captioning loss'})
+    # LOSS weights (Eq 3 / App C.2): (cls, giou, counter, caption) = (2, 4, 2, 2); L1 box loss disabled (bbox=0).
+    class_cost: float = field(default=2, metadata={'help': 'LOSS weight of the classification (focal) term'})
+    bbox_cost: float = field(default=0, metadata={'help': 'LOSS weight of the L1 box term (paper L_total has no L1 term -> 0)'})
+    giou_cost: float = field(default=4, metadata={'help': 'LOSS weight of the GIoU term'})
+    counter_cost: float = field(default=2, metadata={'help': 'LOSS weight of the event counter (BCE) term'})
+    caption_cost: float = field(default=2, metadata={'help': 'LOSS weight of the captioning (NLL) term'})
+    # HUNGARIAN MATCHING cost weights (App C.2 / Eq 13): (cls, L1, giou) = (1, 5, 2). These are DELIBERATELY
+    # distinct from the loss weights above (matcher's job = stable assignment; loss's job = drive learning).
+    # Previously the matcher reused the loss weights, so L1 (the paper's dominant matching term) was 0.
+    match_class_cost: float = field(default=1, metadata={'help': 'MATCHER cost weight of the classification term'})
+    match_bbox_cost: float = field(default=5, metadata={'help': 'MATCHER cost weight of the L1 box term (dominant)'})
+    match_giou_cost: float = field(default=2, metadata={'help': 'MATCHER cost weight of the GIoU term'})
     focal_alpha: float = field(default=0.25)
     with_box_refine: bool = field(default=True, metadata={'help': 'Learnt (True) or Ground truth proposals (False, all losses except caption loss will be disabled)'})
 
@@ -198,10 +205,11 @@ def main():
         num_queries=model_args.num_queries,                # Maximum number of events a window can have
         num_labels=model_args.num_labels,                  # Single foreground class for caption
         auxiliary_loss=model_args.auxiliary_loss,          # The training step may spend a time in per-layer caption alignment and Hungarian matching
-        # Loss hyper-params in the Hungarian matching cost
-        class_cost=model_args.class_cost,                  # Relative weight of the classification error
-        bbox_cost=model_args.bbox_cost,                    # Relative weight of the L1 error of the bounding box coordinates
-        giou_cost=model_args.giou_cost,                    # Relative weight of the generalized IoU loss of the bounding box
+        # config.{class,bbox,giou}_cost feed the Hungarian MATCHER (pdvc.py / loss.py read them). Use the
+        # paper's matching weights (1, 5, 2), NOT the loss weights — the loss weights live in weight_dict above.
+        class_cost=model_args.match_class_cost,            # MATCHER classification cost weight
+        bbox_cost=model_args.match_bbox_cost,              # MATCHER L1 cost weight (paper's dominant matching term)
+        giou_cost=model_args.match_giou_cost,              # MATCHER GIoU cost weight
         focal_alpha=model_args.focal_alpha,
         with_box_refine=model_args.with_box_refine,        # Learnt (True) or Ground truth proposals (False)
     )

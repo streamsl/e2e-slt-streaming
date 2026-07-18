@@ -31,11 +31,15 @@ class ModelArguments:
     num_queries: int = field(default=30, metadata={'help': 'Maximum number of events a window can have'})
     num_labels: int = field(default=1, metadata={'help': 'Single foreground class for caption'})
     auxiliary_loss: bool = field(default=True, metadata={'help': 'The training step may spend a time in per-layer caption alignment and Hungarian matching'})
-    class_cost: float = field(default=2, metadata={'help': 'Relative weight of the classification error'})
-    bbox_cost: float = field(default=0, metadata={'help': 'Relative weight of the L1 error of the bounding box coordinates'})
-    giou_cost: float = field(default=4, metadata={'help': 'Relative weight of the generalized IoU loss of the bounding box'})
-    counter_cost: float = field(default=2, metadata={'help': 'Relative weight of the event counter loss'})
-    caption_cost: float = field(default=2, metadata={'help': 'Relative weight of the captioning loss'})
+    class_cost: float = field(default=2, metadata={'help': 'LOSS weight of the classification (focal) term'})
+    bbox_cost: float = field(default=0, metadata={'help': 'LOSS weight of the L1 box term (0 = disabled, matches paper L_total)'})
+    giou_cost: float = field(default=4, metadata={'help': 'LOSS weight of the GIoU term'})
+    counter_cost: float = field(default=2, metadata={'help': 'LOSS weight of the event counter (BCE) term'})
+    caption_cost: float = field(default=2, metadata={'help': 'LOSS weight of the captioning (NLL) term'})
+    # Hungarian MATCHER cost weights (App C.2): (cls, L1, giou) = (1, 5, 2), distinct from loss weights.
+    match_class_cost: float = field(default=1, metadata={'help': 'MATCHER classification cost weight'})
+    match_bbox_cost: float = field(default=5, metadata={'help': 'MATCHER L1 cost weight (dominant)'})
+    match_giou_cost: float = field(default=2, metadata={'help': 'MATCHER GIoU cost weight'})
     focal_alpha: float = field(default=0.25)
     with_box_refine: bool = field(default=True, metadata={'help': 'Learnt (True) or Ground truth proposals (False, all losses except caption loss will be disabled)'})
 
@@ -105,9 +109,10 @@ def main():
         num_queries=model_args.num_queries,
         num_labels=model_args.num_labels,
         auxiliary_loss=model_args.auxiliary_loss,
-        class_cost=model_args.class_cost,
-        bbox_cost=model_args.bbox_cost,
-        giou_cost=model_args.giou_cost,
+        # config.{class,bbox,giou}_cost feed the Hungarian MATCHER — use matching weights (1, 5, 2).
+        class_cost=model_args.match_class_cost,
+        bbox_cost=model_args.match_bbox_cost,
+        giou_cost=model_args.match_giou_cost,
         focal_alpha=model_args.focal_alpha,
         with_box_refine=model_args.with_box_refine,
     )
