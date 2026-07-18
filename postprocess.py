@@ -8,7 +8,7 @@ from utils import cw_to_se
 
 @torch.no_grad()
 def post_process_object_detection(
-    outputs, top_k: int = 10, threshold: float = 0.5, 
+    outputs, top_k: int = 20, threshold: float = 0.5,  # top_k=20 per paper App C.4 (K=20)
     target_lengths: Union[TensorType, list[int]] = None, 
     tokenizer: AutoTokenizer = None,
 ):
@@ -67,7 +67,10 @@ def post_process_object_detection(
     if len(pred_cap_tokens):
         topk_boxes = topk_boxes.cpu().numpy()                                                            # (batch_size, k_value)
         mask = (pred_cap_tokens != tokenizer.pad_token_id) & (pred_cap_tokens != tokenizer.eos_token_id) # (batch_size, num_queries, max_event_tokens)
-        caption_scores = (pred_cap_logits * mask).sum(dim=-1).cpu().numpy()                              # (batch_size, num_queries)
+        # sum log P(token) over content positions only. Use masked_fill(0) rather than `logits * mask`:
+        # sample() pads post-EOS slots with -inf (mbart.py), and (-inf) * (mask==False==0) = NaN, which
+        # would poison the Eq-14 joint score for every prediction and make reranking select worst-first.
+        caption_scores = pred_cap_logits.masked_fill(~mask, 0.0).sum(dim=-1).cpu().numpy()               # (batch_size, num_queries) = log p_cap
         caption_scores = [caption_scores[i][topk_boxes[i]] for i in range(caption_scores.shape[0])]      # (batch_size, k_value)
         
         pred_cap_tokens = pred_cap_tokens.detach().cpu().numpy()                                         # (batch_size, num_queries, max_event_tokens)

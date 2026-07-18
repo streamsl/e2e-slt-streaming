@@ -61,7 +61,7 @@ def compute_metrics(
     evaluation_results: EvalPrediction, # EvalPrediction will be the whole dataset (a big batch of concatenated batches)
     ranking_temperature: float = 2.0,   # Exponent T in caption score normalization by length^T
 	alpha: float = 0.3, # Ranking policy: joint_score = alpha * (caption_score / len(tokens)^T) + (1 - alpha) * det_score
-    top_k: int = 10,    # Max number of events to keep per window
+    top_k: int = 20,    # Max number of events to keep per window (paper App C.4: K=20)
 	temporal_iou_thresholds: Sequence[float] = (0.3, 0.5, 0.7, 0.9),
     tokenizer: AutoTokenizer = None,
     soda_recursion_limit: int = 0, # Increase recursion limit for SODA_c DP if needed, 0 to disable for faster calculations

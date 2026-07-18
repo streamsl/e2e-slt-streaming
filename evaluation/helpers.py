@@ -179,7 +179,7 @@ def select_topN_per_window(
 	tokenizer: AutoTokenizer = None,
     ranking_temperature: float = 2.0,   # Exponent T in caption score normalization by length^T
 	alpha: float = 0.3, # Ranking policy: joint_score = alpha * (caption_score / len(tokens)^T) + (1 - alpha) * det_score
-    top_k: int = 10,    # Max number of events to keep per window
+    top_k: int = 20,    # Max number of events to keep per window (paper App C.4: K=20)
 ) -> Tuple[List[List[Tuple[float, float]]], List[List[str]], List[List[float]]]:
 	''' Joint-score reranking + top-N selection per window.
 
@@ -208,8 +208,12 @@ def select_topN_per_window(
 			batch_pred_cap_scores.append([])
 			continue
 
-		cap_norm = [ # Normalize caption score by length^T to discourage verbosity
-			c / (max(1, len(tokenizer.encode(t))) ** ranking_temperature + 1e-5)
+		# Eq 14 (App C.4): p_cap(c_i) is the PRODUCT of token probabilities, not the sum of log-probs. post_process returns 
+		# `c` = sum(log p_t) = log p_cap, so exponentiate before normalizing. Dividing the negative log-sum directly (old 
+		# behaviour) rewarded verbosity — the opposite of the intended length penalty. |c_i| is the generated content-token 
+		# count (approx. via re-encoding the decoded text without special tokens), matching tokens whose probs were multiplied.
+		cap_norm = [
+			np.exp(c) / (max(1, len(tokenizer.encode(t, add_special_tokens=False))) ** ranking_temperature + 1e-5)
 			for c, t in zip(event_caption_scores, event_captions)
 		]
 		joint = [alpha * c + (1 - alpha) * s for c, s in zip(cap_norm, event_scores)]
