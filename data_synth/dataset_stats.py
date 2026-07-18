@@ -101,7 +101,7 @@ def stats_for_split(root: Path, split: str, ids: List[str], bpe_tokenizer=None) 
             
         for a, b in zip(subs[:-1], subs[1:]):
             gap = b['start'] - a['end']
-            if gap >= 0: pauses.append(gap)
+            pauses.append(max(0.0, gap))  # match Eq 10 / analyze_bobsl_gaps: overlaps count as 0, not dropped
 
     total_dur = sum(stream_durations)
     total_signing = sum(signing_durations)

@@ -35,7 +35,9 @@ if __name__ == '__main__':
         print(f'  files   pose dirs={n_pose}, vtt files={n_vtt}')
         
         sample_id = sub['test'][0]
-        arr = np.load(root / 'poses' / sample_id / '000.npy')
+        # synthesize_streams writes flat poses/<id>.npy; older BOBSL layout was poses/<id>/000.npy. Try flat first.
+        flat = root / 'poses' / f'{sample_id}.npy'
+        arr = np.load(flat if flat.exists() else root / 'poses' / sample_id / '000.npy')
         cues = parse_vtt(root / 'vtt' / f'{sample_id}.vtt')
         print(f'  raw native coords  x [{arr[...,0].min():.1f}, {arr[...,0].max():.1f}]'
               f'  y [{arr[...,1].min():.1f}, {arr[...,1].max():.1f}]'
@@ -43,7 +45,7 @@ if __name__ == '__main__':
         
         norm = pp.normalize_keypoints(arr.astype(np.float32))
         thr = pp.threshold_confidence(norm)
-        print(f'  sample  {sample_id}  T={arr.shape[0]} ({arr.shape[0]/12.5:.1f}s)  {len(cues)} cues  '
+        print(f'  sample  {sample_id}  T={arr.shape[0]} ({arr.shape[0]/cfg.FPS:.1f}s)  {len(cues)} cues  '
               f'post-norm shape={norm.shape}  finite={bool(np.isfinite(thr).all())}  '
               f'post-norm range x [{norm[...,0].min():.2f}, {norm[...,0].max():.2f}]')
         print(f'  first cue  {cues[0]["start"]:.2f}-{cues[0]["end"]:.2f}s  duration {cues[0]["duration"]:.2f}s')

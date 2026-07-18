@@ -57,7 +57,10 @@ def main():
         for s in subs: sub_durations.append(s['duration'])
         for a, b in zip(subs[:-1], subs[1:]):
             gap = b['start'] - a['end']
-            if gap >= 0: gaps.append(gap)
+            # Paper Eq 10: G = { max(0, t_start_{j+1} - t_end_j) }. Overlapping subtitles (negative gap)
+            # are the MOST co-articulated boundaries and must be counted as zeros, not dropped — dropping
+            # them removes zero-mass and biases the sampled distribution toward positive gaps.
+            gaps.append(max(0.0, gap))
         if subs:
             t_max = max(s['end'] for s in subs)
             for win_s, bucket in [(WINDOW_S, subs_per_window), (STREAM_S, subs_per_stream_window)]:
