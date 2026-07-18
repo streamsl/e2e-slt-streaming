@@ -5,5 +5,7 @@ pdvc/
 DWPose/
 backup/
 *.zip
+*.mp4
 *.pt
 *.safetensors
+.DS_Store

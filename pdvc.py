@@ -13,6 +13,7 @@ from transformers.models.deformable_detr.modeling_deformable_detr import (
     inverse_sigmoid
 )
 from deformable_detr import DeformableDetrModel
+from deformable_detr.attention import TemporalMSDA
 from captioners import LSTMCaptioner, MBartDecoderCaptioner
 from config import TGT_LANG, TRIMMED_TOKENIZER_DIR
 from loss import DeformableDetrHungarianMatcher, DeformableDetrForObjectDetectionLoss, ContrastiveLoss
@@ -116,7 +117,9 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
             self.transformer.decoder.bbox_embed = None
             
         self.loss_function = DeformableDetrForObjectDetectionLoss(config, pad_token_id=pad_token_id, weight_dict=weight_dict)
-        self.contrastive_loss = ContrastiveLoss() if contrastive_mode else None
+        # temperature 0.07 matches this repo's documented intent (main.py header, gfslt logit_scale_init)
+        # and ImageBind's 1/0.07 logit-scale init cited by the paper; the class default (0.1) was undocumented.
+        self.contrastive_loss = ContrastiveLoss(temperature=0.07) if contrastive_mode else None
         
         # Text encoder for contrastive learning (simple embedding + projection)
         self.text_embed, self.text_proj = None, None
@@ -130,6 +133,25 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
             self.pad_token_id = pad_token_id
         self.post_init()
 
+        # post_init() runs HF _init_weights over every submodule, which RE-INITIALIZES the detection heads (class/bbox are plain Linears with no 
+        # _is_hf_initialized guard) and wipes the manual priors set at lines ~94-98/107-108: the focal-prior class bias (-log(99), for p=0.01) 
+        # and the box center/width priors (sigmoid(0)=0.5 center, sigmoid(-2)~=0.12 width) all get zeroed. Re-apply them AFTER post_init. 
+        # The heads are nn.ModuleLists here (built above), so iterate.
+        bias_value = -math.log((1 - 0.01) / 0.01)
+        for m in self.class_head: nn.init.constant_(m.bias.data, bias_value)
+        for i, m in enumerate(self.bbox_head):
+            nn.init.xavier_uniform_(m.layers[-1].weight.data, gain=0.01)                              # small gain for refinement stability
+            if self.config.with_box_refine and i > 0: nn.init.constant_(m.layers[-1].bias.data, 0.0)  # refine layers predict small residuals
+            else:
+                nn.init.constant_(m.layers[-1].bias.data[0], 0.0)                                     # center bias -> sigmoid 0.5
+                nn.init.constant_(m.layers[-1].bias.data[1], -2.0)                                    # width bias  -> sigmoid ~0.12
+
+        # Same problem for deformable-attention modules: TemporalMSDA is a plain nn.Module, so post_init's recursive _init_weights re-initializes
+        # its child Linears generically & destroys spiral sampling-offset grid + zeroed attention weights set in TemporalMSDA._reset_parameters
+        # (the init Deformable-DETR relies on for stable convergence). Restore it after post_init.
+        for m in self.modules(): 
+            if isinstance(m, TemporalMSDA): m._reset_parameters()
+
 
     def _encode_text(self, labels: list[dict]) -> FloatTensor:
         ''' Encode paragraph tokens from labels for contrastive learning.
@@ -140,8 +162,10 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
         Returns:
             text_emb: [B, D] - mean-pooled text embeddings
         '''
-        # Stack paragraph tokens from all samples in batch, using masked_paragraph_tokens for contrastive learning (has noise injection)
-        paragraph_tokens = torch.stack([label.get('masked_paragraph_tokens', label.get('paragraph_tokens')) for label in labels])  # [B, L]
+        # Use CLEAN concatenated translations as text vector t (paper Sec 4.2: "tokenizing the concatenation of all sentence translations"). 
+        # The tri-modal VLP masks the POSE views, not the text; feeding masked_paragraph_tokens here would inject ~15% [MASK] noise into the 
+        # V-T alignment target with no reconstruction objective to justify it (that MLM path lives only in gfslt_stage1).
+        paragraph_tokens = torch.stack([label['paragraph_tokens'] for label in labels])  # [B, L]
         device = next(self.parameters()).device
         paragraph_tokens = paragraph_tokens.to(device)
         
