@@ -309,8 +309,11 @@ class PDVCLoss(ImageLoss):
         source_logits = outputs['pred_cap_logits'][idx]          # [batch_size, num_matched, L, vocab_size]
         
         target_tokens = torch.cat([t['seq_tokens'][i] for t, (b, i) in zip(targets, indices)], dim=0)  # [batch_size, num_matched, max_len]
-        if target_tokens.shape[1] > source_logits.shape[1]:      # Remove the start token for targets if it exists
-            target_tokens = target_tokens[:, 1:source_logits.shape[1] + 1]  # This is for LSTMCaptioner, not MBartDecoderCaptioner
+        if target_tokens.shape[1] > source_logits.shape[1]:      # LSTMCaptioner emits L-1 logits (it consumes a shifted-in
+            # decoder-start); align targets by TRUNCATING to L, not by dropping token[0]. mBART targets are
+            # [t1,...,tN,EOS,LANG] with NO leading start token, so slicing [1:] would delete the first content
+            # token t1 and misalign every step. Keep t1.. -> target_tokens[:, :L]. (mBART path returns full L, skips this.)
+            target_tokens = target_tokens[:, :source_logits.shape[1]]
         
         loss_caption = F.nll_loss(
             source_logits.reshape(-1, source_logits.shape[-1]),  # [batch_size * num_matched * L, vocab_size]

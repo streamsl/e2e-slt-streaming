@@ -96,8 +96,9 @@ class MBartDecoderCaptioner(nn.Module):
             # Get reference points for this level (normalized coordinates)
             ref_points = reference_points[:, :, level, 0]  # (B, Q) - temporal coordinate
             
-            # Convert normalized coordinates to indices (0 to temporal_len-1)
-            indices = (ref_points * (temporal_len - 1)).long().clamp(0, temporal_len - 1)  # (B, Q)
+            # Convert normalized center to a frame index by NEAREST-NEIGHBOR (paper Sec 4.1). Use round(),
+            # not long()/floor which biases the sampled frame ~1 earlier than the nearest integer.
+            indices = (ref_points * (temporal_len - 1)).round().long().clamp(0, temporal_len - 1)  # (B, Q)
             
             # Gather features at reference points and expand indices to (B, Q, D) for gathering
             indices_expanded = indices.unsqueeze(-1).expand(-1, -1, self.config.d_model)  # (B, Q, D)

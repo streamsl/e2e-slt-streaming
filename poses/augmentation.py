@@ -93,8 +93,16 @@ def flip_lr(keypoints: np.ndarray) -> np.ndarray:
         keypoints[:, li, :] = keypoints[:, ri, :]
         keypoints[:, ri, :] = tmp
 
-    keypoints[:, FACE_IDS] = keypoints[:, FACE_IDS][:, ::-1].copy() # Face contour 23..39 (17 points)
-    keypoints[:, MOUTH_IDS] = keypoints[:, MOUTH_IDS][:, ::-1].copy() # Inner mouth 83..90 (8 points)
+    # FACE_IDS = [23..39 jaw contour] + [53 nose]. Mirror ONLY the jaw contour among itself (23<->39,
+    # 24<->38, ... chin-center fixed); the nose is on the centerline and its x was already mirrored above.
+    # Reversing the full FACE_IDS slice wrongly swaps the nose into the jaw contour.
+    face_contour = FACE_IDS[:-1]
+    keypoints[:, face_contour] = keypoints[:, face_contour[::-1]].copy()
+    # Inner mouth (ids 83..90 = 68-landmark inner lip 60..67) is a LOOP, not a left->right strip, so a
+    # plain reversal pairs a corner with a bottom-lip point. Correct mirror: 60<->64, 61<->63, 65<->67;
+    # 62 (top-center) and 66 (bottom-center) stay fixed.
+    mouth_mirror = [MOUTH_IDS[i] for i in (4, 3, 2, 1, 0, 7, 6, 5)]
+    keypoints[:, MOUTH_IDS] = keypoints[:, mouth_mirror].copy()
     return keypoints
 
 
