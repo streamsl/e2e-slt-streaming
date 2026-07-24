@@ -117,33 +117,48 @@ def to_numpy_kpts(rec: dict) -> np.ndarray:
     return kp
 
 
-def trim_rest(kpts: np.ndarray) -> np.ndarray:
-    '''Drop contiguous leading/trailing "rest" frames at clip boundaries.
+def trim_rest(kpts: np.ndarray, rest_speed: float = 0.015, max_trim_s: float = 0.75) -> np.ndarray:
+    '''Drop contiguous leading/trailing HELD-REST frames at clip boundaries.
 
-    Real continuous signing exhibits **co-articulation**: signers do not return to a full rest pose between adjacent 
-    sentences in same utterance. Each pose clip is recorded in isolation, so it begins with a "preparation" phase (hands 
-    rising from lap to 1st sign) & ends with a "retraction" phase (hands falling back to lap). When clips are concatenated 
-    naively, these isolation artefacts produce an obvious "hands-down -> long pause -> hands-up" boundary that localization 
-    head can latch onto trivially. By trimming them, the synthesized stream looks like continuous broadcast signing where 
-    sentence boundaries are *kinematically continuous* & must be inferred from sign content, not from a free pause cue.
+    Real continuous signing exhibits **co-articulation**: signers do not return to a full rest pose between adjacent
+    sentences. Each pose clip is recorded in isolation, so it may begin with a "preparation" phase (hands rising from lap
+    to first sign) and end with a "retraction" phase (hands falling back to lap). Concatenating non-trimmed clips produces
+    an obvious "hands-down -> pause -> hands-up" boundary the localization head can latch onto trivially. Trimming makes
+    boundaries kinematically continuous, so they must be inferred from sign content, not a free rest cue.
 
-    Rule (zero hyperparameters): a frame is "rest" iff both wrists sit BELOW the shoulder line in image-y coordinates. 
-    Pure geometry, signer-relative, scales automatically across canvases. Trimming is contiguous-only (we never cut mid-clip) 
-    and respects a 3-frame floor so the residual clip remains usable for Hermite endpoint-velocity estimation.
+    BUG FIX (reported): the previous rule flagged a frame as "rest" on POSITION ALONE (both wrists below the shoulder
+    line). But signers — CSL-Daily for example — produce most of their signing BELOW shoulder level (measured: ~87-97% of
+    frames are below-shoulder, moving at full signing speed), so that rule deleted active signing: on the CSL test split it
+    trimmed EVERY clip, up to ~9 s of a ~10 s signing segment, while the caption stayed the full sentence — corrupting the
+    translation supervision at the source. A rest pose is a HELD low pose, so we now additionally require the wrists to be
+    near-STILL: motion below `rest_speed` (a fraction of shoulder width per frame). Moving low hands = signing, kept. A
+    per-side `max_trim_s` cap guarantees a mis-classified slow passage can never delete more than that many seconds. The
+    rule is still signer-relative (shoulder-width normalized) and needs no per-dataset threshold; `rest_speed` / `max_trim_s`
+    are physical calibration knobs, not fit parameters. (Datasets that ship a signing segment — CSL start/end — are already
+    tight to signing, so this now trims only ~0.05 s there instead of destroying the clip.)
     '''
     T = kpts.shape[0]
     if T < 3: return kpts
-    sh_y = kpts[:, SHOULDER_IDS, 1].mean(axis=1)
-    wr_y = kpts[:, WRIST_IDS, 1].mean(axis=1)
-    sh_c = kpts[:, SHOULDER_IDS, 2].min(axis=1)
-    wr_c = kpts[:, WRIST_IDS, 2].min(axis=1)
-    valid = (sh_c > 0) & (wr_c > 0)
-    is_rest = (wr_y > sh_y) & valid  # image y-down: larger y == lower in image == hands below shoulders
+    sh = kpts[:, SHOULDER_IDS, :2]
+    wr = kpts[:, WRIST_IDS, :2].mean(axis=1)                         # (T, 2) mean wrist position
+    sh_y = sh[..., 1].mean(axis=1)
+    wr_y = kpts[:, WRIST_IDS, 1].mean(axis=1)                        # image y-down: larger y == lower == below shoulders
+    sh_w = np.linalg.norm(sh[:, 0] - sh[:, 1], axis=1)              # shoulder width per frame = signer scale
+    sh_w = max(float(np.median(sh_w[sh_w > 0])) if np.any(sh_w > 0) else 1.0, 1e-3)
+    valid = (kpts[:, SHOULDER_IDS, 2].min(axis=1) > 0) & (kpts[:, WRIST_IDS, 2].min(axis=1) > 0)
+    speed = np.zeros(T, dtype=np.float32)
+    speed[1:] = np.linalg.norm(np.diff(wr, axis=0), axis=1) / sh_w   # wrist speed, normalized by signer scale
+    if T > 1: speed[0] = speed[1]                                    # frame 0 has no predecessor -> use frame 1's motion
+    # Rest = hands below the shoulder line AND essentially still (a held pose). Moving low hands are signing.
+    is_rest = (wr_y > sh_y) & (speed < rest_speed) & valid
     start = 0
     while start < T and is_rest[start]: start += 1
     end = T
     while end > start and is_rest[end - 1]: end -= 1
-    if end - start < 3: return kpts  # safeguard: don't reduce clip below 3 frames
+    cap = int(max_trim_s * FPS)                                      # never delete more than max_trim_s per side
+    start = min(start, cap)
+    end = max(end, T - cap)
+    if end - start < 3: return kpts  # safeguard: keep >=3 frames for Hermite endpoint-velocity estimation
     return kpts[start:end]
 
 
@@ -169,8 +184,10 @@ def resample_to_fps(kpts: np.ndarray, src_fps: float, tgt_fps: float = FPS) -> n
     frac = ((tgt_t - src_t[lo]) / span).astype(np.float32)[:, None, None]
     out = np.empty((T_tgt, 133, 3), dtype=np.float32)
     out[..., :2] = (1.0 - frac) * kpts[lo][..., :2] + frac * kpts[hi][..., :2]
-    # Confidence: nearest-neighbour, matching prior `searchsorted side='left'` semantics.
-    near = np.clip(np.searchsorted(src_t, tgt_t, side='left'), 0, T_src - 1)
+    # Confidence: TRUE nearest-neighbour (paper A.2 step 1). searchsorted side='left' returns the CEILING
+    # (later) source frame for any target strictly between two frames, biasing confidence to the later frame;
+    # rounding the fractional source index picks the genuinely nearest frame (source frames are uniform).
+    near = np.clip(np.round(tgt_t * src_fps).astype(np.int64), 0, T_src - 1)
     out[..., 2] = kpts[near, :, 2]
     return out
 
@@ -283,8 +300,7 @@ def synth_one_stream(
         phantom_right = resampled[0] if len(resampled) > 1 else resampled[-1]
 
     segments: List[np.ndarray] = []
-    cues: List[Tuple[float, float, str]] = []
-    durations: dict = {'pre_s': 0.0, 'pauses_s': [], 'post_s': 0.0}
+    durations: dict = {'pre_s': 0.0, 'pauses_s': [], 'post_s': 0.0, 'coart_joins': 0, 'pause_joins': 0}
     cur = 0
 
     # BG_pre = Hermite interp from phantom_left[-1] -> resampled[0][0] (signer "transitioning into" the first sentence). 
@@ -302,22 +318,54 @@ def synth_one_stream(
     durations['pre_s'] = L_pre_s
     cur += bg_pre.shape[0]
 
-    for i, (clip, text) in enumerate(zip(resampled, texts)):
+    # Build physical stream (clip | bridge | clip | ...), recording each clip's physical frame span and, per seam, whether the sampled 
+    # BOBSL gap was ZERO (co-articulated) or POSITIVE (a real pause). We still insert a >=2-frame Hermite bridge at EVERY  seam -- it is 
+    # a numerical necessity for a C1-continuous transition, because clip[-1] and next_clip[0] are kinematically  independent and a hard 
+    # concat would teleport (an even more trivial boundary cue than a gap). But the ORACLE cue boundaries are computed in a second pass 
+    # below: co-articulated seams are *absorbed* into 2 adjacent sentences so their boundaries are frame-adjacent.
+    clip_spans: List[Tuple[int, int]] = []          # physical [start, end) frame range of each real clip
+    joins: List[dict] = []                          # per seam i (between clip i and i+1): {'n': bridge_frames, 'coart': bool}
+    for i, clip in enumerate(resampled):
+        c_start = cur
         segments.append(clip)
-        cues.append((cur / FPS, (cur + clip.shape[0]) / FPS, text))
         cur += clip.shape[0]
+        clip_spans.append((c_start, cur))
         if i < len(resampled) - 1:
             L_pause_s = float(rng.choice(pause['samples_s']))
-            n_pause = max(MIN_BRIDGE_FRAMES, int(round(L_pause_s * FPS)))
+            n_content = int(round(L_pause_s * FPS))         # frames the sampled gap actually spans (0 for ~74% of BOBSL gaps)
+            is_coart = (n_content == 0)                     # zero-gap -> co-articulated: sentences must be frame-adjacent
+            n_bridge = max(MIN_BRIDGE_FRAMES, n_content)    # still need >=2 frames for a C1 Hermite seam even at zero gap
             pause_seg = hermite_interp_segment(
                 clip[-1], resampled[i + 1][0],
                 endpoint_velocity(clip, 'last'),
                 endpoint_velocity(resampled[i + 1], 'first'),
-                n_pause,
+                n_bridge,
             )
             segments.append(pause_seg)
             cur += pause_seg.shape[0]
+            joins.append({'n': n_bridge, 'coart': is_coart})
             durations['pauses_s'].append(L_pause_s)
+            durations['coart_joins' if is_coart else 'pause_joins'] += 1
+
+    # Oracle cues: Emitting cue_i = [clip_i.start, clip_i.end] will leave EVERY =2-frame bridge as a non-transcribed gap, so adjacent 
+    # sentences were never frame-adjacent, even for the ~74% of BOBSL joins whose gap is exactly 0. That contradicts real continuous 
+    # signing, where a sign sentence can start immediately after another (co-articulation / movement epenthesis), and it hands the 
+    # localization head a trivial "there's always a small non-signing sliver between sentences" cue that doesn't exist in real streams.
+    # Correct behaviour: a co-articulated (zero-gap) seam is signing content, not background. Its Hermite epenthesis frames are split 
+    # at the midpoint and absorbed into 2 adjacent sentences so cue_i.end == cue_{i+1}.start (frame-adjacent). Only a genuine pause 
+    # (sampled gap > 0) stays a non-transcribed background gap between sentences. This makes the synthetic oracle match the BOBSL gap 
+    # statistics we sample from (analyze_bobsl_gaps.py) and the co-articulation goal stated in paper App. A.2, and it forces the model 
+    # to infer boundaries from sign content.
+    cues: List[Tuple[float, float, str]] = []
+    for i, ((c_start, c_end), text) in enumerate(zip(clip_spans, texts)):
+        left = c_start
+        if i > 0 and joins[i - 1]['coart']:                        # take ceil(n/2) from the (co-articulated) preceding bridge
+            n_prev = joins[i - 1]['n']
+            left = c_start - (n_prev - n_prev // 2)
+        right = c_end
+        if i < len(clip_spans) - 1 and joins[i]['coart']:          # take floor(n/2) from the (co-articulated) following bridge
+            right = c_end + joins[i]['n'] // 2
+        cues.append((left / FPS, right / FPS, text))
 
     # BG_post = Hermite interp from resampled[-1][-1] -> phantom_right[0] 
     # (broadcast lead-out; same positive-only sampling as BG_pre).

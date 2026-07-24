@@ -53,23 +53,20 @@ HAND_EDGES_LOCAL = [(0, 1), (1, 2), (2, 3), (3, 4),
 def find_cjk_font():
     '''Return a path to a TrueType/OpenType font with CJK glyph coverage, or None.
 
-    Checked in order: explicit common Windows / Linux (Ubuntu, Colab) / macOS paths,
-    then matplotlib's font_manager (which scans the system's font dirs and respects
-    fonts installed via apt / brew / pip downloads).
+    Checked in order: explicit common Windows / Linux (Ubuntu, Colab) / macOS paths, then matplotlib's 
+    font_manager (which scans the system's font dirs and respects fonts installed via apt / brew / pip downloads).
 
     On Colab/Linux without CJK fonts, install one of:
         apt-get install -y fonts-noto-cjk
         apt-get install -y fonts-wqy-microhei
 
-    Falls back to a Latin-only DejaVu font (still better than PIL's bitmap default
-    so headers render at a sane size); CJK chars then show as missing-glyph boxes
-    and the caller is warned.
+    Falls back to a Latin-only DejaVu font (still better than PIL's bitmap default so headers render at a sane size); 
+    CJK chars then show as missing-glyph boxes and the caller is warned.
     '''
-    cjk_candidates = [
+    for c in [
         # Windows
-        'C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/msyhbd.ttc',
-        'C:/Windows/Fonts/simhei.ttf', 'C:/Windows/Fonts/simsun.ttc',
-        'C:/Windows/Fonts/YuGothM.ttc', 'C:/Windows/Fonts/meiryo.ttc',
+        'C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/msyhbd.ttc', 'C:/Windows/Fonts/simhei.ttf', 
+        'C:/Windows/Fonts/simsun.ttc', 'C:/Windows/Fonts/YuGothM.ttc', 'C:/Windows/Fonts/meiryo.ttc',
         # Linux (apt fonts-noto-cjk / fonts-wqy-* / fonts-arphic-*)
         '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
         '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
@@ -81,26 +78,21 @@ def find_cjk_font():
         # macOS
         '/System/Library/Fonts/PingFang.ttc',
         '/System/Library/Fonts/STHeiti Light.ttc',
-        '/Library/Fonts/Arial Unicode.ttf',
-    ]
-    for c in cjk_candidates: if os.path.exists(c): return c
+        '/Library/Fonts/Arial Unicode.ttf']: 
+        if os.path.exists(c): return c
     try: # matplotlib font_manager fallback — scans system font dirs.
         import matplotlib.font_manager as fm
-        for name in ('Noto Sans CJK SC', 'Noto Sans CJK JP', 'Noto Sans CJK',
-                     'WenQuanYi Micro Hei', 'WenQuanYi Zen Hei',
-                     'PingFang SC', 'Hiragino Sans GB', 'SimHei', 'Microsoft YaHei',
-                     'AR PL UMing CN'):
+        for name in ('Noto Sans CJK SC', 'Noto Sans CJK JP', 'Noto Sans CJK', 'WenQuanYi Micro Hei', 'WenQuanYi Zen Hei',
+                     'PingFang SC', 'Hiragino Sans GB', 'SimHei', 'Microsoft YaHei', 'AR PL UMing CN'):
             try:
                 p = fm.findfont(fm.FontProperties(family=name), fallback_to_default=False)
                 if p and os.path.exists(p): return p
             except Exception: continue
     except Exception: pass
     for c in ( # Last-resort Latin-only fallback (renders ASCII at proper size; CJK -> tofu).
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-        'C:/Windows/Fonts/arial.ttf',
-        '/Library/Fonts/Arial.ttf',
-    ): if os.path.exists(c): return c
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        'C:/Windows/Fonts/arial.ttf', '/Library/Fonts/Arial.ttf'): 
+        if os.path.exists(c): return c
     return None
 
 
@@ -183,7 +175,7 @@ def overlay_text(canvas_bgr, top_label, bottom_text, header_color, font_path):
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 
-def main():
+if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--pose', required=True)
     p.add_argument('--vtt', required=True)
@@ -224,7 +216,3 @@ def main():
 
     writer.release()
     print(f'Wrote {args.out}')
-
-
-if __name__ == '__main__':
-    main()

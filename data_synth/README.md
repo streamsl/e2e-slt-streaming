@@ -1,22 +1,22 @@
 # Synthetic streaming SL benchmarks for StreamSLST
 
-Synthesize streaming sign-language datasets from offline pre-segmented pose pickles for **PHOENIX-2014T** (DGS, German) and **CSL-Daily** (CSL, Chinese), and from real signer-aligned timestamps for **How2Sign** (ASL, English), all in BOBSL-compatible layout.
+Synthesize streaming sign-language benchmarks for **PHOENIX-2014T** (DGS, German), **CSL-Daily** (CSL, Chinese), and **How2Sign** (ASL, English) from offline sentence-level pose clips, all in BOBSL-compatible layout.
 
-Two distinct synthesis pathways:
+**One synthesis pathway for all three datasets.** Each stream is a same-signer concatenation of _K_ sentence clips joined by Hermite C¹ bridges, whose gap durations are sampled from the empirical BOBSL inter-subtitle distribution, with exact frame-level oracle boundaries by construction. The datasets differ only in their source layout and a few per-dataset constants:
 
-| Dataset       | Source                                      | Stream construction                                                  | Bridges                                   | Gap distribution                                                   |
-| ------------- | ------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------ |
-| PHOENIX-2014T | Per-clip pickles, signer-known              | Same-signer concatenation; _K_ from BOBSL 60-s window stat (§4.8)    | Hermite C¹ (§4.5)                         | Empirical BOBSL inter-subtitle gaps (§4.6)                         |
-| CSL-Daily     | Per-clip pickles, signer-known              | Same-signer concatenation; _K_ from BOBSL 60-s window stat           | Hermite C¹                                | Empirical BOBSL inter-subtitle gaps                                |
-| How2Sign      | Per-clip OpenPose-137 JSONs + realigned CSV | Per-`VIDEO_ID` concatenation on the **real** original-video timeline | Linear C⁰ (no co-articulation simulation) | **Real H2S realigned gaps** (optionally clamped via `--max_gap_s`) |
+| Dataset       | Source layout                         | Signer unit  | Src → proc fps | Canvas    | Lang    |
+| ------------- | ------------------------------------- | ------------ | -------------- | --------- | ------- |
+| PHOENIX-2014T | one big pickle per split              | broadcast    | 25 → 12.5      | 210 × 260 | `de_DE` |
+| CSL-Daily     | per-clip `.pkl` (+ `start`/`end`)     | `P<id>`      | 30 → 15        | 512 × 512 | `zh_CN` |
+| How2Sign      | per-clip `.pkl` (Uni-Sign RTMPose)    | YouTube ID   | 30 → 15        | 1280 × 720 | `en_XX` |
 
-Pick your benchmark via `DATASET={PHOENIX,CSL,H2S}`. PHOENIX/CSL are documented in §1–§10; the **How2Sign-specific path** is documented in §H2S.
+Pick a benchmark via `DATASET={PHOENIX,CSL,H2S}`; `config.py` resolves all paths, fps, canvas, language code, and the trimmed mBART for that dataset. (An earlier CSV-timeline How2Sign path was removed — H2S now uses this same pathway, because the >10 s instructional dead-time in real H2S timing produced too many empty training windows.)
 
 ## Why synthetic streams
 
 BOBSL's **auto-aligned** subtitles introduce annotation noise. Synthetic streams give us:
 
-- two more sign languages (DGS, CSL) covering cross-language generalization;
+- three more sign languages (DGS, CSL, ASL) covering cross-language generalization;
 - **oracle event boundaries** by construction (we _know_ exactly when each sentence starts and ends), letting us re-run the alignment / learned-vs-GT ablations to disentangle "model can't localize" from "BOBSL labels are noisy";
 
 ## Drop-in compatibility
@@ -25,18 +25,20 @@ Outputs match BOBSL's `loader.DVCDataset` directory contract:
 
 ```
 data/synth/<lang>/
-├── poses/<stream_id>.npy           # (T, 133, 3) float32 at 12.5 fps, NATIVE pixel coords
+├── poses/<stream_id>.npy           # (T, 133, 3) float32 at the processing fps, native pixel coords
 ├── vtt/<stream_id>.vtt             # WEBVTT, one sentence per cue (single-line text)
 ├── subset2episode.json             # {"train": [...], "val": [...], "test": [...]}
 └── manifest.json                   # provenance: clip ids per stream + seed + pause/k_range used
 ```
 
-`DVCDataset._build_video_metadata` was extended to support both layouts:
+`DVCDataset._build_video_metadata` supports both pose layouts: BOBSL's multi-segment `POSE_ROOT/<video_id>/*.npy` and the synth flat `POSE_ROOT/<stream_id>.npy`. All datasets share `facebook/mbart-large-cc25` (its 25-language vocabulary covers en/de/zh natively), trimmed per language.
 
-- **BOBSL**: `POSE_ROOT/<video_id>/*.npy` (multi-segment)
-- **synth**: `POSE_ROOT/<stream_id>.npy` (flat single file)
+## Source layouts
 
-Switch dataset via the `DATASET` env var: `BOBSL` (default) | `PHOENIX` | `CSL`. `config.py` then resolves all paths, the mBART backbone, the target language code (`en_XX` / `de_DE` / `zh_CN`), and the per-dataset frame canvas (`(W,H) = (444,444) / (210,260) / (512,512)`) automatically. We use **`facebook/mbart-large-cc25`** for all 3 languages — its 25-language vocabulary covers all 3 target codes natively.
+The synthesizer reads two input layouts, auto-selected from `config.SYNTH_META`:
+
+- **Big pickle** (PHOENIX): one `{.train,.dev,.test}` pickle per split, each a dict `{name: {'keypoint': (T,133,3), 'text': str, 'num_frames': int}}` in native pixel coords.
+- **Per-sample pickle** (CSL, H2S): `poses/<name>.pkl` with `{'keypoints': (T,1,133,2) normalized [0,1], 'scores': (T,1,133)}` plus a gzipped `labels.<split>` dict. **CSL** pickles additionally carry `start`/`end` frame indices marking the actual signing segment — the loader slices `[start:end]` automatically, so the clip is already tight to signing. **H2S** (Uni-Sign RTMPose) has no `dev` split; use `--val_frac` to carve one at synthesis time.
 
 ---
 
@@ -78,7 +80,7 @@ S  =  [ B_pre ][ c_1 ][ Δ_1 ][ c_2 ][ Δ_2 ] ... [ c_K ][ B_post ]
          BG      clip  bridge  clip  bridge       clip     BG
 ```
 
-where each $c_k$ is a real signer-pose clip from the offline pickle (after rest-trimming, §4.4) and each connector $\Delta_k, B_\text{pre}, B_\text{post}$ is a Hermite-interpolated bridge whose duration is sampled directly from the empirical BOBSL inter-subtitle gap distribution. Most $\Delta_k$ collapse to a 2-frame "movement-epenthesis" transition because BOBSL's empirical gap distribution puts ~74% of its mass at zero — i.e. real broadcast signing concatenates sentences co-articulated, not separated by neutral rest.
+where each $c_k$ is a real signer-pose clip from the offline corpus (after rest-trimming, §4.4) and each connector $\Delta_k, B_\text{pre}, B_\text{post}$ is a Hermite-interpolated bridge whose duration is sampled from the empirical BOBSL inter-subtitle gap distribution. Because ~74% of that distribution's mass is at zero, most seams are **co-articulated**: the bridge there is a short movement-epenthesis transition that is *signing content*, absorbed into the two adjacent sentences so their oracle boundaries touch ($e_k = s_{k+1}$; §4.1). Only the ~26% of seams with a positive sampled gap leave a non-transcribed background pause between sentences.
 
 ---
 
@@ -94,10 +96,10 @@ where each $c_k$ is a real signer-pose clip from the offline pickle (after rest-
 | $f$                                            | Target frame rate                                                              | $12.5$ Hz (matches StreamSLST `config.FPS`)                  |
 | $W$                                            | Model training window length                                                   | $15$ s (matches StreamSLST `config.WINDOW_DURATION_SECONDS`) |
 | $W_\text{stream}$                              | Stream design target window                                                    | $4 W = 60$ s (see §4.9)                                      |
-| $G \in \mathbb{R}^{30552}$                     | BOBSL empirical inter-subtitle gap array (negatives clipped to 0)              | `bobsl_gap_samples.npy`                                      |
-| $G_+ \subset G$                                | Positive-only subset of $G$                                                    | $\lvert G_+ \rvert = 7,997$                                  |
+| $G$                                            | BOBSL empirical inter-subtitle gap array, $g=\max(0,\cdot)$ (Eq 10)            | `bobsl_gap_samples.npy` (≈74% zero)                         |
+| $G_+ \subset G$                                | Positive-only subset of $G$                                                    | `bobsl_gap_samples.npy`, $G_i>0$                             |
 | $K$                                            | Number of sentence clips per stream                                            | sampled from $[K_\text{lo}, K_\text{hi}]$                    |
-| $K_\text{lo}, K_\text{hi}$                     | $p_{10}, p_{90}$ of `subs_per_60s_window`(BOBSL)                               | $[6, 19]$                                                    |
+| $K_\text{lo}, K_\text{hi}$                     | $p_{10}, p_{90}$ of `subs_per_60s_window`(BOBSL)                               | from `bobsl_gap_stats.json`                                  |
 | $n_\text{min}$                                 | Numerical floor for the Hermite bridge                                         | $2$ frames (§4.5)                                            |
 | $\rho_\text{min}$                              | Minimum signer-pool size (need ≥1 phantom + ≥1 chosen)                         | $2$                                                          |
 
@@ -113,11 +115,15 @@ A stream is the temporal concatenation of $2K + 1$ segments:
 
 $$S \ =\  B_\text{pre} \ \Vert\  c_1 \ \Vert\  \Delta_1 \ \Vert\  c_2 \ \Vert\  \Delta_2 \ \Vert\  \cdots \ \Vert\  c_K \ \Vert\  B_\text{post}$$
 
-where $\Vert$ denotes frame-axis concatenation. The **clip segments** $c_k$ contribute the actual subtitle events; the **bridge segments** $\Delta_k$ and the **background segments** $B_\text{pre}, B_\text{post}$ are non-event and contribute only background frames. The cue annotation list is computed deterministically from the segment lengths:
+where $\Vert$ denotes frame-axis concatenation. The **clip segments** $c_k$ contribute the actual subtitle events; the **background segments** $B_\text{pre}, B_\text{post}$ are non-event. A **bridge** $\Delta_k$ is attributed depending on the gap it was sampled for (see below).
 
-$$A = \\{(s_k, e_k, t_k)\\}_{k=1..K}, \quad s_k = \frac{1}{f}(\lvert B_\text{pre}\rvert + \sum_{j<k}(\lvert c_j\rvert + \lvert \Delta_j\rvert)), \quad e_k = s_k + \frac{\lvert c_k\rvert}{f}$$
+**Oracle cue attribution (co-articulation vs. pause).** A seam is _co-articulated_ when its sampled BOBSL gap is exactly $0$ — ~74% of seams (§4.6). In real continuous signing a sentence can start immediately after another: there is no non-signing frame between them, only movement epenthesis. So a co-articulated $\Delta_k$ is **signing content**, not background, and is split at its midpoint and absorbed into the two adjacent sentences, making their oracle boundaries **frame-adjacent** ($e_k = s_{k+1}$). Only a _pause_ seam (sampled gap $> 0$) keeps $\Delta_k$ as a non-transcribed background gap. Writing $a_k = \lfloor |\Delta_k|/2 \rfloor,\ b_k = \lceil |\Delta_k|/2 \rceil$ for co-articulated seams (and $a_k = b_k = 0$ for pause seams):
+
+$$s_k = \frac{1}{f}\Big(\lvert B_\text{pre}\rvert + \sum_{j < k}(\lvert c_j\rvert + \lvert \Delta_j\rvert) - b_{k-1}\Big), \qquad e_k = \frac{1}{f}\Big(\lvert B_\text{pre}\rvert + \sum_{j < k}(\lvert c_j\rvert + \lvert \Delta_j\rvert) + \lvert c_k\rvert + a_k\Big)$$
 
 Because $A$ is computed from segment lengths chosen by the synthesizer, the boundaries are **oracle** — exact to the frame.
+
+> **Fixed bug.** An earlier version set $e_k = s_k + |c_k|/f$ unconditionally, leaving _every_ $\Delta_k$ — including the ~74% zero-gap ones — as a non-transcribed sliver, so no two sentences were ever frame-adjacent. That contradicted the co-articulation goal below and handed the localization head a trivial "there is always a small gap between sentences" cue absent from real streams (real BOBSL has ~74% touching subtitle boundaries). A physical $\ge 2$-frame Hermite bridge is still inserted at every seam for $C^1$ continuity (§4.5) — a hard concat would teleport, an even more trivial cue — but co-articulated bridges are now _labelled as signing_, not as a gap.
 
 ## 4.2 Same-signer clip pool
 
@@ -132,49 +138,38 @@ A stream draws all of its $K$ clips from a single $\mathcal{P}_s$. Cross-signer 
 
 The signer ID is parsed deterministically from each clip's `name` field (no external metadata, no pseudo mapping):
 
-- **PHOENIX**: clip name is `<split>/<broadcast>-<sentence_idx>` (e.g. `train/11August_2010_Wednesday_tagesschau-1`). One broadcast = one signer in PHOENIX. We group by `name.split('/')[1].rsplit('-', 1)[0]`.
-- **CSL**: clip name is `Sxxx_P<id>_Tyy`. We group by the `P<id>` token.
+- **PHOENIX**: name is `<split>/<broadcast>-<sentence_idx>` (e.g. `train/11August_2010_Wednesday_tagesschau-1`). One broadcast = one signer; group by the broadcast.
+- **CSL**: name is `Sxxx_P<id>_Tyy`; group by the `P<id>` token.
+- **H2S**: name is `<YouTubeID>_<sentence>-<take>-rgb_<view>.mp4`; sentences from the same source video share a signer + setup, so group by the YouTube ID.
 
 ```python
 def signer_id(dataset, clip_name):
     if dataset == 'PHOENIX': return re.sub(r'-\d+$', '', clip_name.split('/', 1)[-1])
     if dataset == 'CSL':     return f"P{re.search(r'_P(\\d+)_', clip_name).group(1)}"
+    if dataset == 'H2S':     return re.match(r'^(.+?)_\d+-\d+-rgb_(?:front|side)', clip_name.rsplit('/',1)[-1]).group(1)
 ```
 
 ## 4.3 Frame-rate resampling
 
-Source clips arrive at the source dataset's native frame rate ($25$ Hz for PHOENIX, $30$ Hz for CSL). They are resampled to the StreamSLST training rate $f = 12.5$ Hz by per-joint linear interpolation on $(x, y)$ and nearest-neighbour on the confidence channel:
+Source clips arrive at the source dataset's native frame rate (25 Hz PHOENIX; 30 Hz CSL/H2S). They are resampled to the per-dataset processing rate $f$ (12.5 Hz PHOENIX; 15 Hz CSL/H2S) by per-joint linear interpolation on $(x, y)$ and true nearest-neighbour on the confidence channel:
 
 $$P^{(f)}_t \ =\  \text{interp}(P^{(f_\text{src})}, t / f, \  t \in 0 .. \lfloor f \cdot T_\text{src} / f_\text{src} \rfloor)$$
 
 Confidence is taken nearest-neighbour rather than averaged because averaging confidences is semantically meaningless (a 50%-confident average of two predictions does not mean "half-confident at the average position").
 
-## 4.4 `trim_rest` — geometric removal of preparation / retraction
+## 4.4 `trim_rest` — removal of held preparation / retraction
 
 Each isolated clip begins with a _preparation_ phase (signer raises hands from lap to first sign location) and ends with a _retraction_ phase (hands fall back to lap). These artifacts are absent in real continuous broadcast signing — signers move directly between adjacent sentences without returning to rest. Concatenating non-trimmed clips creates an obvious "hands-down → long pause → hands-up" boundary that the localization head can latch onto trivially.
 
-A frame is "rest" if both wrists sit BELOW the shoulder line in image coordinates (where larger $y$ = lower in the image):
+A rest pose is a **held low pose**: the hands are below the shoulder line AND essentially still. A frame is "rest" iff both conditions hold:
 
-$$\text{rest}(t) \ =\  \mathbb{1}\ \left[\ \frac{1}{|W|}\ \sum_{j \in W} P^{j,y}_t \ >\  \frac{1}{|S|}\ \sum_{j \in S} P^{j,y}_t\ \right]$$
+$$\text{rest}(t) \ =\  \mathbb{1}\ \Big[\ \underbrace{\tfrac{1}{|W|}\!\sum_{j \in W} P^{j,y}_t \ >\  \tfrac{1}{|S|}\!\sum_{j \in S} P^{j,y}_t}_{\text{hands below shoulders}}\ \Big]\ \cdot\ \mathbb{1}\ \Big[\ \underbrace{\tfrac{\lVert \bar w_t - \bar w_{t-1}\rVert}{\text{shoulder width}} \ <\  \rho}_{\text{near-still}}\ \Big]$$
 
-where $W = \\{9, 10\\}$ (wrist indices in COCO-WholeBody-133) and $S = \\{5, 6\\}$ (shoulder indices). The rule is **signer-relative** — it compares the signer's own wrists against the signer's own shoulders — so it auto-scales across PHOENIX (210 × 260 canvas) and CSL (512 × 512 canvas) without any per-dataset threshold.
+where $W = {9, 10}$ (wrists), $S = {5, 6}$ (shoulders), $\bar w_t$ is the mean wrist position, and $\rho$ (`rest_speed`, default $0.015$) is the still-motion threshold in shoulder-widths per frame. The rule is **signer-relative** (both the position and motion terms are normalized by the signer's own shoulders), so it auto-scales across canvases with no per-dataset threshold.
 
-The trim interval is the contiguous non-rest core:
+> **Fixed bug.** An earlier rule used the **position term only** (`hands below shoulders`). But signers — CSL-Daily for example — produce most of their signing _below_ shoulder level (measured: 87–97% of frames are below-shoulder and moving at full signing speed). The position-only rule therefore classified active signing as rest and deleted it: on the CSL test split it trimmed **every** clip, up to **~9 s of a ~10 s signing segment** (`S001667`: 10.77 s clip → 1.07 s span), while the caption stayed the full sentence — corrupting the translation supervision at the source. Requiring **near-zero motion** (a held pose) fixes this: on the same worst-case clips the trim drops to 0.00–0.07 s. A per-side cap `max_trim_s` (default 0.75 s) additionally guarantees a mis-classified slow passage can never delete more than that many seconds.
 
-$$t_\text{start} = \min\\{t : \text{rest}(t) = 0\\}, \qquad t_\text{end} = \max\\{t : \text{rest}(t) = 0\\} + 1$$
-
-Trim is applied only to the _contiguous prefix and suffix_ runs of rest frames — we never cut mid-clip. A safety floor preserves the original clip if trimming would leave fewer than 3 frames (the minimum needed for endpoint-velocity estimation in the Hermite bridge).
-
-```python
-def trim_rest(P):
-    sh_y = P[:, [5, 6],  1].mean(axis=1)
-    wr_y = P[:, [9, 10], 1].mean(axis=1)
-    valid = (P[:, [5, 6, 9, 10], 2].min(axis=1) > 0)        # all 4 anchors confidently estimated
-    is_rest = (wr_y > sh_y) & valid
-    start = next(t for t in range(len(P)) if not is_rest[t])
-    end   = next(t for t in range(len(P)-1, -1, -1) if not is_rest[t]) + 1
-    return P if end - start < 3 else P[start:end]
-```
+The trim interval is the contiguous non-rest core, capped per side; a safety floor preserves the clip if trimming would leave fewer than 3 frames (needed for Hermite endpoint velocities). $\rho$ and `max_trim_s` are physical **calibration** constants (real rest is near-still), not fit parameters.
 
 After this transformation, each clip starts and ends _during signing activity_. Concatenating two trimmed clips produces a kinematically continuous signing-to-signing transition rather than a rest-pose-mediated one — exactly the **co-articulation** phenomenon real signers exhibit (also called _movement epenthesis_ in the sign-linguistics literature).
 
@@ -230,13 +225,9 @@ def sample_pause_s(rng, G):
     return float(rng.choice(G))
 ```
 
-Where the array $G$ comes from $4{,}468$ BOBSL manual VTT files: for every adjacent subtitle pair $(a, b)$ in every file we compute $g = b.\text{start} - a.\text{end}$, giving $|G| = 30{,}552$ gaps. Negatives are clipped to zero (overlapping subtitles cannot be a "pause"; they are continuous signing). After clipping,
+The array $G$ is every adjacent-subtitle gap $g = \max(0,\ b.\text{start} - a.\text{end})$ over all BOBSL manual VTT files (per Eq 10 of the paper). Overlapping subtitles have a **negative** raw gap, but they are the *most* co-articulated boundaries, so they clamp to $0$ — they must **not** be dropped, or the zero-mass is understated. The exact counts are written by `analyze_bobsl_gaps.py`; on the current run **≈74% of gaps are exactly zero**, with a heavy positive tail (median ≈2 s).
 
-$$\mathbb{P}(\ell = 0) \ =\  \frac{|\\{G_i : G_i = 0\\}|}{|G|} \ =\  \frac{22\,555}{30\,552} \ \approx\  0.738$$
-
-So **73.8% of inter-clip joins in any synthesized stream concatenate co-articulated** by construction — without any LogNormal fit, any `pause_min_s` knob, or any `pause_max_s` clamp. The empirical CDF _is_ the model.
-
-The remaining 26.2% of joins receive positive bridge durations sampled from the right tail of $G$, with median $\approx 2.0$ s and $p_{90} \approx 6.0$ s — matching what real BOBSL exhibits.
+So **≈74% of inter-clip joins concatenate co-articulated** by construction — no LogNormal fit, no `pause_min_s` / `pause_max_s` knob. The empirical CDF _is_ the model. The remaining ~26% of joins receive positive bridge durations from the right tail of $G$.
 
 ## 4.7 BG_pre / BG_post sampling
 
@@ -244,7 +235,7 @@ The remaining 26.2% of joins receive positive bridge durations sampled from the 
 
 We therefore sample BG durations from the **conditional distribution** $\hat{\mathbb{P}}(\ell \mid \ell > 0)$, equivalently from the positive-only subset
 
-$$G_+ = \\{ G_i \in G : G_i > 0 \\}, \quad |G_+| = 7\,997$$
+$$G_+ = \\{ G_i \in G : G_i > 0 \\}$$
 
 ```python
 def sample_bg_s(rng, G_plus):
@@ -301,7 +292,7 @@ Output:  pose tensor P (T, 133, 3),  cue list A = [(start_s, end_s, text)]
 
  1: K         ← rng.uniform_int(K_lo, min(K_hi, |Pool[s]|))
  2: chosen    ← rng.choice(Pool[s], K, replace=False)         # ORDER IS RANDOM (= permutation)
- 3: resampled ← [trim_rest(resample_to_FPS(P_i, src_fps)) for c_i in chosen]
+ 3: resampled ← [trim_rest(resample_to_FPS(P_i, src_fps)) for c_i in chosen]   # trim_rest = held-rest only (§4.4)
  4: drop entries shorter than 1·FPS frames; if resampled = ∅ return empty stream
  5: spare ← Pool[s] \ chosen
  6: if |spare| ≥ 2:  φ_L, φ_R ← rng.choice(spare, 2)          # phantom clips for BG
@@ -313,24 +304,24 @@ Output:  pose tensor P (T, 133, 3),  cue list A = [(start_s, end_s, text)]
                      resampled[0][0], v(resampled[0], "first"),
                      n = max(MIN_BRIDGE_FRAMES, ⌊ℓ_pre · FPS⌉))
 
-10: segments ← [B_pre]; cues ← []; cur ← |B_pre|
+10: segments ← [B_pre]; cur ← |B_pre|; spans ← []; joins ← []      # lay out clips + inter-clip bridges
 11: for k = 0 ... K-1:
-12:     segments.append(resampled[k])
-13:     cues.append( (cur/FPS,  (cur+|resampled[k]|)/FPS,  t_k) )
-14:     cur ← cur + |resampled[k]|
-15:     if k < K-1:
-16:         ℓ ← rng.choice(G)                                 # FULL empirical, ~74% zeros
-17:         Δ ← Hermite(resampled[k][-1],   v(resampled[k],   "last"),
-                        resampled[k+1][0], v(resampled[k+1], "first"),
-                        n = max(MIN_BRIDGE_FRAMES, ⌊ℓ · FPS⌉))
-18:         segments.append(Δ); cur ← cur + |Δ|
+12:     c0 ← cur; segments.append(resampled[k]); cur ← cur + |resampled[k]|; spans.append((c0, cur))
+13:     if k < K-1:
+14:         ℓ ← rng.choice(G)                                 # FULL empirical, ~74% zeros
+15:         coart ← (⌊ℓ · FPS⌉ == 0);  n ← max(MIN_BRIDGE_FRAMES, ⌊ℓ · FPS⌉)
+16:         Δ ← Hermite(resampled[k][-1], resampled[k+1][0], …, n)
+17:         segments.append(Δ); cur ← cur + n; joins.append((n, coart))
 
-19: B_post ← Hermite(resampled[-1][-1], v(resampled[-1], "last"),
-                     φ_R[0],            v(φ_R,           "first"),
-                     n = max(MIN_BRIDGE_FRAMES, ⌊ℓ_post · FPS⌉))
-20: segments.append(B_post)
-21: P ← concat(segments, axis=0);  A ← cues
-22: return (P, A)
+18: B_post ← Hermite(resampled[-1][-1], φ_R[0], …, n = max(MIN_BRIDGE_FRAMES, ⌊ℓ_post · FPS⌉))
+19: segments.append(B_post)
+
+20: cues ← []                                                 # oracle cues (§4.1): absorb a co-articulated
+21: for k, (c0, c1) ∈ enumerate(spans):                       #   (zero-gap) bridge into the two sentences so
+22:     left  ← c0 − (⌈joins[k−1].n / 2⌉ if k>0   and joins[k−1].coart else 0)   #   they are frame-adjacent;
+23:     right ← c1 + (⌊joins[k].n   / 2⌋ if k<K−1 and joins[k].coart   else 0)   #   a pause bridge stays a gap
+24:     cues.append( (left/FPS, right/FPS, t_k) )
+25: return (concat(segments), cues)
 ```
 
 `v(P, end)` returns the per-frame velocity at the requested clip endpoint: $\mathbf{v}(P, \text{last}) = P[-1] - P[-2]$, $\mathbf{v}(P, \text{first}) = P[1] - P[0]$. Confidence channel set to $0$ (unused for tangent computation).
@@ -338,14 +329,15 @@ Output:  pose tensor P (T, 133, 3),  cue list A = [(start_s, end_s, text)]
 ## Algorithm 2 — driver across splits
 
 ```
-Inputs:  dataset D ∈ {PHOENIX, CSL}, seed σ
+Inputs:  dataset D ∈ {PHOENIX, CSL, H2S}, seed σ
 Output:  per-split stream files + manifest.json + subset2episode.json
 
- 1: G        ← np.clip( load("bobsl_gap_samples.npy"), 0, ∞ )           # negatives → 0
+ 1: G        ← np.clip( load("bobsl_gap_samples.npy"), 0, ∞ )           # already g=max(0,·)
  2: G_+      ← G[G > 0]
  3: K_lo, K_hi ← p10, p90 of bobsl_stats["subs_per_stream_window"]      # 60-s sliding window
  4: for split ∈ {train, val, test}:
- 5:     C_split ← load_pickle(D, split);  drop clips with |P_i| < 1·src_fps or empty text
+ 5:     C_split ← load_split(D, split)     # big-pickle (PHOENIX) | per-sample .pkl (CSL/H2S; slice [start:end])
+        drop clips with |P_i| < 1·src_fps or empty text
  6:     Pool ← group C_split by signer (§4.2);  drop pools with size < ρ_min
  7:     N_S ← max(1, round(|⋃ Pool| / mean(K_lo, K_hi)))                # stream count (§4.9)
  8:     for j = 1 ... N_S:
@@ -367,28 +359,28 @@ Every value the synthesizer touches is either pure geometry or measured directly
 | $f$ (FPS)                  | StreamSLST `config.FPS`                                                | $12.5$ Hz                                                           |
 | $W$ (training window)      | StreamSLST `config.WINDOW_DURATION_SECONDS`                            | $15$ s                                                              |
 | $W_\text{stream}$          | Design ratio $4 W$                                                     | $60$ s                                                              |
-| $K_\text{lo}, K_\text{hi}$ | $p_{10}, p_{90}$ of `subs_per_60s_window`(BOBSL)                       | $[6, 19]$                                                           |
-| $G$                        | All inter-subtitle gaps from BOBSL manual VTTs, negatives clipped to 0 | $\lvert G\rvert = 30\,552$, $\mathbb{P}(g=0)=0.738$, $p_{90}=2.0$ s |
-| $G_+$                      | $G \setminus \\{0\\}$                                                  | $\lvert G_+\rvert = 7\,997$, median $2.0$ s, $p_{90} = 10.0$ s      |
+| $K_\text{lo}, K_\text{hi}$ | $p_{10}, p_{90}$ of `subs_per_60s_window`(BOBSL)                       | from `bobsl_gap_stats.json`                                        |
+| $G$                        | All inter-subtitle gaps from BOBSL manual VTTs, $g=\max(0,\cdot)$      | `bobsl_gap_samples.npy` (≈74% zero, $p_{90}\approx 2$ s)          |
+| $G_+$                      | $G \setminus \\{0\\}$                                                  | `bobsl_gap_samples.npy`, positive subset                          |
 | $n_\text{min}$             | Numerical floor for Hermite (1 frame is just a point)                  | $2$                                                                 |
 | $\rho_\text{min}$          | Need ≥1 phantom + ≥1 chosen                                            | $2$                                                                 |
-| trim_rest threshold        | Wrists vs shoulder geometry (Boolean per frame, §4.4)                  | none                                                                |
+| trim_rest rule             | Hands-below-shoulders AND near-still, signer-relative (§4.4)           | $\rho=0.015$ sw/frame, cap 0.75 s/side (calibration)                |
 | Tangent damping $\alpha_n$ | $n_\text{min} / \max(n, n_\text{min})$                                 | reuses existing constant, no new knob                               |
 
 ---
 
 # 7. Design decisions vs alternatives
 
-| Choice we made                                  | Alternative considered                      | Why we picked ours                                                                                                                                                                             |
-| ----------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Empirical pause sampling (§4.6)                 | LogNormal fit to $G_+$                      | Real BOBSL is bimodal (74% zero + 26% positive heavy tail); no parametric distribution captures the zero spike. Empirical CDF _is_ the truth.                                                  |
-| Positive-only $G_+$ for BG (§4.7)               | Same $G$ as inter-clip                      | With $G$, ~74% of streams collapse to a 2-frame BG (invisible). $G_+$ enforces visible BG without a min-duration knob.                                                                         |
-| `trim_rest` rule = wrist-below-shoulder (§4.4)  | Per-clip 30th-percentile velocity threshold | Velocity threshold needs a per-clip percentile (a knob); geometric rule is signer-relative and parameter-free.                                                                                 |
-| Hermite cubic spline (§4.5)                     | Linear interpolation                        | Linear has $C^0$ continuity at the seam → visible velocity discontinuity. Hermite achieves $C^1$.                                                                                              |
-| Tangent damping by $1/n$ (§4.5)                 | Fixed tangent magnitude                     | Fixed tangent overshoots on long bridges. $1/n$ damping makes long bridges relax to position-only interpolation.                                                                               |
-| Same-signer per stream (§4.2)                   | Cross-signer                                | Cross-signer introduces scale-jump and identity-change leakage; same-signer matches BOBSL.                                                                                                     |
-| $K$ from 60-s window (§4.8)                     | $K$ from 15-s window                        | 15 s = model window; streams must span ≥ 4× window for streaming inference to actually fire.                                                                                                   |
-| Stream count = $\lvert C\rvert / \bar K$ (§4.9) | Multiplier-based inflation                  | On small pools (PHOENIX, ~3 clips/broadcast) any multiplier $>1$ saturates the $K!$ permutation space and biases training toward duplicated streams. Each clip used $\sim$ once is principled. |
+| Choice we made                                     | Alternative considered         | Why we picked ours                                                                                                                                                                                        |
+| -------------------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Empirical pause sampling (§4.6)                    | LogNormal fit to $G_+$         | Real BOBSL is bimodal (74% zero + 26% positive heavy tail); no parametric distribution captures the zero spike. Empirical CDF _is_ the truth.                                                             |
+| Positive-only $G_+$ for BG (§4.7)                  | Same $G$ as inter-clip         | With $G$, ~74% of streams collapse to a 2-frame BG (invisible). $G_+$ enforces visible BG without a min-duration knob.                                                                                    |
+| `trim_rest` = below-shoulder AND near-still (§4.4) | Position-only (below-shoulder) | Position-only deletes low signing (CSL signs below the shoulder line): it trimmed ~9 s of a 10 s clip. Rest is a _held_ pose, so gating on near-zero motion is required; both terms stay signer-relative. |
+| Hermite cubic spline (§4.5)                        | Linear interpolation           | Linear has $C^0$ continuity at the seam → visible velocity discontinuity. Hermite achieves $C^1$.                                                                                                         |
+| Tangent damping by $1/n$ (§4.5)                    | Fixed tangent magnitude        | Fixed tangent overshoots on long bridges. $1/n$ damping makes long bridges relax to position-only interpolation.                                                                                          |
+| Same-signer per stream (§4.2)                      | Cross-signer                   | Cross-signer introduces scale-jump and identity-change leakage; same-signer matches BOBSL.                                                                                                                |
+| $K$ from 60-s window (§4.8)                        | $K$ from 15-s window           | 15 s = model window; streams must span ≥ 4× window for streaming inference to actually fire.                                                                                                              |
+| Stream count = $\lvert C\rvert / \bar K$ (§4.9)    | Multiplier-based inflation     | On small pools (PHOENIX, ~3 clips/broadcast) any multiplier $>1$ saturates the $K!$ permutation space and biases training toward duplicated streams. Each clip used $\sim$ once is principled.            |
 
 ---
 
@@ -396,150 +388,99 @@ Every value the synthesizer touches is either pure geometry or measured directly
 
 | Failure mode                                  | Safeguard in code                                                                 |
 | --------------------------------------------- | --------------------------------------------------------------------------------- |
-| `trim_rest` cuts entire clip                  | If $t_\text{end} - t_\text{start} < 3$, return original clip unchanged            |
+| `trim_rest` deletes signing                   | Rest requires below-shoulder **and** near-still; per-side cap `max_trim_s`; 3-frame floor (§4.4) |
 | Hermite called with $n \leq 0$                | Returns empty array of correct shape                                              |
 | Hermite tangent magnitude explodes            | Clamped to $2 \lVert \mathbf{p}_1 - \mathbf{p}_0\rVert$ per joint per side        |
-| Sampled pause = 0                             | Floored to $n_\text{min} = 2$ (smooth co-articulation transition)                 |
+| Sampled gap = 0 (co-articulated)              | Bridge floored to $n_\text{min}=2$ for $C^1$ continuity **and** absorbed into the two sentences (frame-adjacent, §4.1) |
 | Signer pool too small for phantoms            | Fall back to using first/last chosen clip as phantom (still Hermite-interpolated) |
 | Subtitle is empty / clip < 1 s after resample | Drop the clip; skip stream if no clips remain                                     |
-| Negative inter-subtitle gap (overlap)         | Clipped to 0 in `bobsl_gap_samples.npy` (load-time, see §4.6)                     |
+| Negative inter-subtitle gap (overlap)         | Clamped to 0 ($g=\max(0,\cdot)$) — the most co-articulated boundary, **not** dropped (§4.6) |
 | Pose confidence values $> 1.0$                | Clipped to $[0, 1]$ at clip-load time                                             |
+| **Signing silently deleted vs caption**       | `verify_stream_integrity.py` gate: each cue span must ≈ its source signing segment (§11) |
 
 ---
 
 # 9. Workflow
 
+The pipeline is the same for every dataset — only the `DATASET` env var changes (`PHOENIX` | `CSL` | `H2S`).
+
 ```bash
-# 0. (one-time, after BOBSL.zip extracted) compute pause + K stats from BOBSL MANUAL annotations.
+# 0. (one-time) compute the gap + K stats from BOBSL MANUAL annotations. Writes bobsl_gap_stats.json
+#    (summary) and bobsl_gap_samples.npy (empirical gap array, g=max(0,·)). If skipped, the synthesizer
+#    falls back to an analytic distribution of the same shape.
 python -m data_synth.analyze_bobsl_gaps \
     --vtt_dir data/BOBSL/manual_annotations/signing_aligned_subtitles \
     --out data_synth/stats/bobsl_gap_stats.json
-# Writes both bobsl_gap_stats.json (summary) and bobsl_gap_samples.npy (full empirical array).
-# If skipped, the synthesizer falls back to an analytic distribution that emulates the same shape.
 
-# 1. Synthesize streams (no count args; everything derived from data + BOBSL stats).
-DATASET=PHOENIX python -m data_synth.synthesize_streams --out_root data/synth/phoenix # --k_range 3 5
-DATASET=CSL python -m data_synth.synthesize_streams --out_root data/synth/csl  # --k_range 3 5
+# 1. Synthesize streams (everything derived from the data + BOBSL stats). H2S has no dev split -> --val_frac.
+DATASET=PHOENIX python -m data_synth.synthesize_streams --out_root data/synth/phoenix
+DATASET=CSL     python -m data_synth.synthesize_streams --out_root data/synth/csl
+DATASET=H2S     python -m data_synth.synthesize_streams --out_root data/synth/h2s --val_frac 0.05
 
-# 2. Visualize a few streams (reads DATASET env to pick canvas; renders the 77 model-input keypoints
-#    with auto-fit window so out-of-frame pose outliers don't push the body off-screen).
-DATASET=PHOENIX python -m data_synth.visualize_stream \
-    --pose data/synth/phoenix/poses/test_00000.npy \
-    --vtt  data/synth/phoenix/vtt/test_00000.vtt --out data_synth/examples/phoenix_test_00000.mp4
+# 2. Integrity gate — every cue span must contain (nearly) the full source signing segment. Non-zero exit on FAIL.
+DATASET=CSL python -m data_synth.verify_stream_integrity --root data/synth/csl --split test
+
+# 3. Trim the mBART tokenizer + decoder to this dataset's vocabulary (writes captioners/trimmed_mbart_<ds>/).
+DATASET=CSL python -m captioners.trim_mbart
+
+# 4. Dataset stats (BOBSL-paper style; reports word + BPE vocab).
+DATASET=CSL python -m data_synth.dataset_stats --root data/synth/csl --out data_synth/stats/csl_stats.json
+
+# (optional) visualize a stream: renders the 77 model-input keypoints as MP4 with subtitle overlay.
 DATASET=CSL python -m data_synth.visualize_stream \
-    --pose data/synth/csl/poses/test_00000.npy \
-    --vtt  data/synth/csl/vtt/test_00000.vtt --out data_synth/examples/csl_test_00000.mp4
-
-# 3. Trim mBART tokenizer + model per language (writes captioners/trimmed_*_<lang>/)
-DATASET=PHOENIX python -m captioners.trim_mbart
-DATASET=CSL     python -m captioners.trim_mbart
-
-# 4. Compute BOBSL-paper-style dataset stats (also reports BPE-subword vocab from the trimmed tokenizer)
-DATASET=PHOENIX python -m data_synth.dataset_stats --root data/synth/phoenix --out data_synth/stats/phoenix_stats.json
-DATASET=CSL     python -m data_synth.dataset_stats --root data/synth/csl     --out data_synth/stats/csl_stats.json
+    --pose data/synth/csl/poses/test_00000.npy --vtt data/synth/csl/vtt/test_00000.vtt \
+    --out data_synth/examples/csl_test_00000.mp4
 ```
 
 ---
 
 # 10. Resulting benchmark sizes
 
-K is derived from a **60-second** sliding window of BOBSL ($= 4 W$, the model's training window) so synthesized streams span multiple model windows and the streaming inference behaviour the paper claims actually fires at evaluation time. Combined with `trim_rest` + empirical pauses + positive-only BG, streams are median 40–60 s long with 7–11 sentences each:
+$K$ is derived from a **60-second** BOBSL window ($=4W$, the model's training window), so streams span multiple model windows and the streaming inference behaviour actually fires at eval time. Stream length depends on the signer-pool size: PHOENIX dev/test broadcasts have only ~2–3 clips each (short streams; the underlying biological signer count is 9 across 629 broadcasts), while CSL's 10 signers and H2S's per-video pools are much larger.
 
-| split         | streams | signer-pure pools | hours | cues / stream | stream dur p50 / p90 (s) | pause med / p90 (s) | density |
-| ------------- | ------: | ----------------: | ----: | ------------: | -----------------------: | ------------------: | ------: |
-| PHOENIX train |     564 |    387 broadcasts |  6.99 |          7.67 |              41.6 / 65.2 |         0.00 / 2.00 |   0.715 |
-| PHOENIX val   |      27 |                25 |  0.10 |          2.07 |              13.0 / 20.8 |         0.00 / 1.10 |   0.515 |
-| PHOENIX test  |      38 |                35 |  0.17 |          2.50 |              15.1 / 25.8 |         0.00 / 2.00 |   0.522 |
-| CSL train     |   _TBD_ |          10 P-ids | _TBD_ |         _TBD_ |            _TBD_ / _TBD_ |       _TBD_ / _TBD_ |   _TBD_ |
-| CSL val       |   _TBD_ |                10 | _TBD_ |         _TBD_ |            _TBD_ / _TBD_ |       _TBD_ / _TBD_ |   _TBD_ |
-| CSL test      |   _TBD_ |                10 | _TBD_ |         _TBD_ |            _TBD_ / _TBD_ |       _TBD_ / _TBD_ |   _TBD_ |
-
-Pause distribution matches the BOBSL empirical sample by construction (~74% of inter-clip joins have $\ell = 0$ and concatenate co-articulated, see §4.6). PHOENIX dev/test streams are shorter than train because per-broadcast clip pools on those splits are only ~2–3 clips — same-signer-per-stream caps $K$ at the pool size; the underlying biological signer count is 9 across all 629 broadcasts. CSL is unaffected (each of the 10 P-ids has hundreds of clips per split).
-
----
-
-# §H2S. How2Sign — Uni-Sign poses, BOBSL-style synthesis
-
-We switched How2Sign to the **same BOBSL-style synthesis pathway as PHOENIX/CSL** (in `synthesize_streams.py`). The previous CSV-realigned-timing path (`synthesize_h2s.py` + `op2coco.py`) and the `--max_gap_s` cap are removed: the >10 s instructional dead-time in How2Sign produced too many empty training windows and required a synthetic cap to be workable, so we just do BOBSL-style synthesis directly.
-
-## Source format
-
-How2Sign now uses [Uni-Sign](https://github.com/ZechengLi19/Uni-Sign)'s released pose data (RTMPose / MMPose Wholebody, COCO-WholeBody-133):
-
-```
-data/How2Sign/
-├── labels.train     # gzipped pickle: {name: {'name','gloss','text','video_path'}}
-├── labels.test
-└── poses/<name>.pkl # {'keypoints': list[(1,133,2)] normalized [0,1], 'scores': list[(1,133)], 'w_h': [W,H]}
-```
-
-The Uni-Sign labels file has no `dev` split (per `datasets.py: NotImplementedError("How2Sign dev set is not supported")`). Use `--val_frac` to carve a val split from train at synthesis time.
-
-CSL-Daily ships the same way at `data/CSL-Daily/labels.{train,dev,test}` + `poses/<name>.pkl`; CSL pose pickles additionally carry `start`/`end` frame indices marking the actual signing segment within the source clip — `synthesize_streams.py` slices `[start:end]` automatically.
-
-## Stream construction (identical to PHOENIX/CSL)
-
-Each stream is a same-`VIDEO_ID` (for H2S; same-signer for PHOENIX/CSL) concatenation of _K_ sentences with BOBSL-derived pauses and Hermite C¹ bridges — `trim_rest` strips clip-end rest frames; `BG_pre` and `BG_post` are sampled from positive-only BOBSL gaps. See §6 above for the full algorithm; the H2S branch uses the same code path with `signer_id` returning the YouTube video ID (e.g. `--7E2sU6zP4` from `--7E2sU6zP4_12-5-rgb_front.mp4`).
-
-## Upstream caveats (handled by the adapter)
-
-- **[Uni-Sign #2](https://github.com/ZechengLi19/Uni-Sign/issues/2)** — per-split counts differ from the Uni-Sign paper. We trust the gzipped labels file as source of truth and print the actual loaded count.
-- **[Uni-Sign #34](https://github.com/ZechengLi19/Uni-Sign/issues/34)** — no H2S dev split. Use `--val_frac` to carve one (deterministic given `--seed`).
-- **[how2sign-data #4](https://github.com/how2sign/how2sign-data/issues/4)** — ~117 sample drift across CVPR21 paper / CSV / clip folders. The loader silently skips label entries whose pose `.pkl` is absent on disk (common when only a partial download is available) and logs the drop count.
-
-## Layout & switching
-
-```
-data/synth/h2s/
-├── poses/<stream_id>.npy           # (T, 133, 3) float32 at 15 fps, pixel-equivalent coords on a 1280×720 canvas
-├── vtt/<stream_id>.vtt             # WEBVTT, one cue per sentence
-├── subset2episode.json             # {"train": [...], "val": [...], "test": [...]}
-└── manifest.json                   # full provenance + pause stats + val_frac + seed
-```
-
-Switch at runtime via `DATASET=H2S`. `config.py` resolves `WIDTH×HEIGHT = 1280×720` (a unified pixel-equivalent canvas — per-sample `w_h` varies and is normalized away during loading), `TGT_LANG='en_XX'`, and the trimmed tokenizer / mBART paths to `captioners/trimmed_*_h2s/`.
-
-## H2S workflow
+Regenerate the exact per-split numbers after synthesis with `dataset_stats` — the trim and boundary fixes changed them, so any previously-recorded sizes are **stale**:
 
 ```bash
-# 1. Synthesize all splits in one call (carve 5% of train into val since Uni-Sign has no H2S dev set)
-DATASET=H2S python -m data_synth.synthesize_streams --out_root data/synth/h2s --val_frac 0.05
-
-# 2. Visualize a stream (sanity check)
-DATASET=H2S python -m data_synth.visualize_stream \
-    --pose data/synth/h2s/poses/<stream_id>.npy \
-    --vtt  data/synth/h2s/vtt/<stream_id>.vtt --out data_synth/examples/h2s_demo.mp4
-
-# 3. Trim mBART tokenizer + model for English (en_XX) on H2S vocabulary
-DATASET=H2S python -m captioners.trim_mbart
-
-# 4. BOBSL-paper-style dataset stats
-DATASET=H2S python -m data_synth.dataset_stats --root data/synth/h2s --out data_synth/stats/h2s_stats.json
+DATASET=CSL python -m data_synth.dataset_stats --root data/synth/csl --out data_synth/stats/csl_stats.json
 ```
 
-## Resulting H2S benchmark sizes
-
-Run `DATASET=H2S python -m data_synth.dataset_stats --root data/synth/h2s --out data_synth/stats/h2s_stats.json` after synthesizing to populate the table:
-
-| split     | streams | hours | cues / stream | stream dur p50 / p90 (s) | pause med / p90 (s) | density |
-| --------- | ------: | ----: | ------------: | -----------------------: | ------------------: | ------: |
-| H2S train |   _TBD_ | _TBD_ |         _TBD_ |                    _TBD_ |               _TBD_ |   _TBD_ |
-| H2S val   |   _TBD_ | _TBD_ |         _TBD_ |                    _TBD_ |               _TBD_ |   _TBD_ |
-| H2S test  |   _TBD_ | _TBD_ |         _TBD_ |                    _TBD_ |               _TBD_ |   _TBD_ |
+| split | streams | hours | cues/stream | stream dur p50/p90 (s) | pause med/p90 (s) | density |
+| ----- | ------: | ----: | ----------: | ---------------------: | ----------------: | ------: |
+| _populate per split by running `dataset_stats`_ |||||||
 
 ---
 
-# 11. Reproducibility
+# How2Sign — upstream caveats
 
-Per-stream RNG is `np.random.default_rng([base_seed, stream_idx])` so re-running with the same `--seed` reproduces every stream byte-for-byte. Default seeds: train=42, val=43, test=44. Override via `--seed`. The dataset's `manifest.json` records per stream: chosen clip names, phantom clip names, pause durations sampled, signer ID (or VIDEO_ID for H2S), _K_, total stream duration, plus the `--val_frac` value and seed used for the carve. Dataset can be reconstructed from the source poses + manifest alone.
+How2Sign uses [Uni-Sign](https://github.com/ZechengLi19/Uni-Sign)'s released RTMPose data via the per-sample layout above. Three upstream quirks are handled by the loader:
+
+- **[Uni-Sign #2](https://github.com/ZechengLi19/Uni-Sign/issues/2)** — per-split counts differ from the Uni-Sign paper. We trust the gzipped labels file and print the actual loaded count.
+- **[Uni-Sign #34](https://github.com/ZechengLi19/Uni-Sign/issues/34)** — no H2S dev split. Use `--val_frac` to carve one (deterministic given `--seed`).
+- **[how2sign-data #4](https://github.com/how2sign/how2sign-data/issues/4)** — ~117 sample drift across CVPR21 / CSV / clip folders. The loader silently skips label entries whose pose `.pkl` is absent on disk and logs the drop count.
+
+---
+
+# 11. Integrity check
+
+`verify_stream_integrity.py` guards against the class of bug where `trim_rest` / slicing silently deletes signing while the caption keeps the full sentence — i.e. the pose span no longer matches the reference text. For each stream it pairs the VTT cues (in order) with the source clips in `manifest.json` and checks `cue_span_s ≈ source_signing_s`; it prints a JSON report and exits non-zero on `FAIL`, so it can gate a re-synthesis. Run it on every dataset/split before trusting any numbers:
+
+```bash
+DATASET=CSL python -m data_synth.verify_stream_integrity --root data/synth/csl --split test
+```
+
+---
+
+# 12. Reproducibility
+
+Per-stream RNG is `np.random.default_rng([base_seed, stream_idx])` so re-running with the same `--seed` reproduces every stream byte-for-byte. Default seeds: train=42, val=43, test=44. Override via `--seed`. `manifest.json` records per stream: chosen clip names, phantom clip names, sampled pause durations, signer ID (YouTube ID for H2S), _K_, total duration, plus the `--val_frac` value and seed. The dataset can be reconstructed from the source poses + manifest alone.
 
 ---
 
 # Files
 
-- `synthesize_streams.py` — Unified synthesis entry for PHOENIX, CSL, H2S. Algorithms 1 + 2 (BOBSL-derived gaps, Hermite bridges).
-- `analyze_bobsl_gaps.py` — writes `bobsl_gap_stats.json` (summary + K-range stats) and `bobsl_gap_samples.npy` (full empirical gap array consumed by `synthesize_streams.py`)
-- `bobsl_gap_stats.json` / `bobsl_gap_samples.npy` — produced by the above; both auto-detected by `synthesize_streams.py`
-- `visualize_stream.py` — renders the 77 model-input keypoints as MP4 with PIL CJK subtitle overlay; segments labelled `[BG/PAUSE]` vs the subtitle text so phases are visually distinguishable
-- `dataset_stats.py` — BOBSL-paper-style stats; reports word vocab + BPE vocab side by side; consumes the unified `manifest.json`
-- `verify_synth.py` — round-trip sanity check (load → normalize → threshold → parse_vtt)
+- `synthesize_streams.py` — unified synthesis entry for PHOENIX, CSL, H2S (Algorithms 1 + 2: BOBSL-derived gaps, Hermite bridges, co-articulation-absorbed oracle cues).
+- `analyze_bobsl_gaps.py` — writes `bobsl_gap_stats.json` (summary + K-range) and `bobsl_gap_samples.npy` (empirical gap array, `g=max(0,·)`, consumed by `synthesize_streams.py`).
+- `verify_stream_integrity.py` — integrity gate: every cue span must ≈ its source signing segment; non-zero exit on FAIL (§11).
+- `verify_synth.py` — round-trip sanity check (load → normalize → threshold → parse_vtt).
+- `dataset_stats.py` — BOBSL-paper-style stats; reports word + BPE vocab; consumes `manifest.json`.
+- `visualize_stream.py` — renders the 77 model-input keypoints as MP4 with subtitle overlay; segments labelled `[BG/PAUSE]` vs subtitle text.

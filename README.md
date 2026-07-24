@@ -1,4 +1,4 @@
-# Streaming Sign Language Translation via Dense Temporal Grounding
+# StreamSLST: Streaming Sign Language Translation via Dense Temporal Grounding
 
 This repository contains the official implementation for end-to-end streaming sign language translation (SLT) using a dense temporal grounding framework. The system jointly localizes and translates sign language events from continuous pose streams without requiring gloss annotations.
 
@@ -10,11 +10,13 @@ The model processes continuous pose sequences through a sliding window mechanism
 2. **Dense captioning** — translating each localized event into the target spoken language
 
 The architecture combines:
+
 - A **pose backbone** (CoSign ST-GCN or MSKA) for spatiotemporal feature extraction from skeleton keypoints
 - A **Deformable DETR** encoder-decoder for temporal event detection
 - A **trimmed mBART** caption decoder for multilingual translation
 
 Training follows a two-stage procedure:
+
 - **Stage 1:** Visual-language contrastive pre-training (InfoNCE with masked pose views)
 - **Stage 2:** Joint localization and captioning with Hungarian matching
 
@@ -22,12 +24,12 @@ A cascaded baseline (**GFSLT-VLP**) is also provided for comparison.
 
 ## Supported Datasets
 
-| Dataset | Language | Source | Pose Format |
-|---|---|---|---|
-| BOBSL | English (BSL) | Auto-aligned broadcast subtitles | COCO-WholeBody-133 via DWPose |
-| PHOENIX-2014T | German (DGS) | Synthesized streams from per-clip pickles | COCO-WholeBody-133 |
-| CSL-Daily | Chinese (CSL) | Synthesized streams from per-clip pickles | COCO-WholeBody-133 |
-| How2Sign | English (ASL) | Real signer-aligned timestamps | COCO-WholeBody-133 (from OpenPose) |
+| Dataset       | Language      | Source                                    | Pose Format                        |
+| ------------- | ------------- | ----------------------------------------- | ---------------------------------- |
+| BOBSL         | English (BSL) | Auto-aligned broadcast subtitles          | COCO-WholeBody-133 via DWPose      |
+| PHOENIX-2014T | German (DGS)  | Synthesized streams from per-clip pickles | COCO-WholeBody-133                 |
+| CSL-Daily     | Chinese (CSL) | Synthesized streams from per-clip pickles | COCO-WholeBody-133                 |
+| How2Sign      | English (ASL) | Real signer-aligned timestamps            | COCO-WholeBody-133 (from OpenPose) |
 
 Switch datasets via environment variable: `DATASET={BOBSL,PHOENIX,CSL,H2S}`. All paths, target language codes, and preprocessing parameters are resolved automatically in `config.py`.
 
@@ -60,8 +62,8 @@ For datasets other than BOBSL, synthesize streaming benchmarks from pre-segmente
 
 ```bash
 DATASET=PHOENIX python -m data_synth.synthesize_streams --out_root data/synth/phoenix
-DATASET=CSL python -m data_synth.synthesize_streams --out_root data/synth/csl
-DATASET=H2S python -m data_synth.synthesize_h2s --out_root data/synth/h2s
+DATASET=CSL     python -m data_synth.synthesize_streams --out_root data/synth/csl
+DATASET=H2S     python -m data_synth.synthesize_streams --out_root data/synth/h2s --val_frac 0.05
 ```
 
 See `data_synth/README.md` for details on the co-articulation synthesis pipeline.
@@ -125,23 +127,23 @@ torchrun --nproc_per_node <NUM_GPUS> main.py \
 
 ### Key Training Flags
 
-| Category | Flag | Default | Description |
-|---|---|---|---|
-| Data | `--max_event_tokens` | 40 | Max tokens per caption |
-| Data | `--stride_ratio` | 0.9 | Sliding window stride (val/test) |
-| Data | `--noise_rate` | 0.15 | Token masking rate for contrastive learning |
-| Data | `--pose_augment` | False | Apply pose augmentation (train only) |
-| Model | `--d_model` | 1024 | Hidden dimension |
-| Model | `--num_queries` | 30 | Max detected events per window |
-| Model | `--encoder_layers` | 2 | Deformable DETR encoder layers |
-| Model | `--decoder_layers` | 2 | Deformable DETR decoder layers |
-| Model | `--num_cap_layers` | 3 | Caption decoder layers |
-| Model | `--captioner_type` | mbart | Caption head type (`mbart` or `lstms`) |
-| Loss | `--class_cost` | 2 | Classification loss weight |
-| Loss | `--giou_cost` | 4 | GIoU loss weight |
-| Loss | `--counter_cost` | 2 | Event count loss weight |
-| Loss | `--caption_cost` | 2 | Caption loss weight |
-| Backbone | `BACKBONE` env var | cosign | Pose backbone (`cosign` or `mska`) |
+| Category | Flag                 | Default | Description                                 |
+| -------- | -------------------- | ------- | ------------------------------------------- |
+| Data     | `--max_event_tokens` | 40      | Max tokens per caption                      |
+| Data     | `--stride_ratio`     | 0.9     | Sliding window stride (val/test)            |
+| Data     | `--noise_rate`       | 0.15    | Token masking rate for contrastive learning |
+| Data     | `--pose_augment`     | False   | Apply pose augmentation (train only)        |
+| Model    | `--d_model`          | 1024    | Hidden dimension                            |
+| Model    | `--num_queries`      | 30      | Max detected events per window              |
+| Model    | `--encoder_layers`   | 2       | Deformable DETR encoder layers              |
+| Model    | `--decoder_layers`   | 2       | Deformable DETR decoder layers              |
+| Model    | `--num_cap_layers`   | 3       | Caption decoder layers                      |
+| Model    | `--captioner_type`   | mbart   | Caption head type (`mbart` or `lstms`)      |
+| Loss     | `--class_cost`       | 2       | Classification loss weight                  |
+| Loss     | `--giou_cost`        | 4       | GIoU loss weight                            |
+| Loss     | `--counter_cost`     | 2       | Event count loss weight                     |
+| Loss     | `--caption_cost`     | 2       | Caption loss weight                         |
+| Backbone | `BACKBONE` env var   | cosign  | Pose backbone (`cosign` or `mska`)          |
 
 ## 4. Training (GFSLT Baseline)
 
@@ -237,8 +239,7 @@ python pdvc.py
 │   ├── helpers.py             # Top-k selection, aggregation utilities
 │   └── soda_c.py              # SODA_c implementation
 ├── data_synth/                # Stream synthesis for PHOENIX/CSL/H2S
-│   ├── synthesize_streams.py  # PHOENIX/CSL synthesis
-│   ├── synthesize_h2s.py      # How2Sign synthesis
+│   ├── synthesize_streams.py  # Unified entry for PHOENIX (big-pickle) and CSL/H2S (Uni-Sign)
 │   └── README.md              # Synthesis documentation
 └── poses/
     ├── preprocessing.py       # Keypoint normalization
